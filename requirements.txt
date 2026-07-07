@@ -1,0 +1,12 @@
+streamlit>=1.38
+pandas>=2.2
+numpy>=1.26
+plotly>=5.22
+duckdb>=1.0
+yfinance>=0.2.40
+statsmodels>=0.14
+scipy>=1.13
+requests>=2.31
+# Optional: Snowflake system-of-record (installed separately if wheels exist for your Python)
+# snowflake-connector-python>=3.12
+matplotlib>=3.8
