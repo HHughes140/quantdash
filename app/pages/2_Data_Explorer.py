@@ -9,15 +9,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 import streamlit as st
 
-from quantdash.data import get_source
+from quantdash.data import get_source, get_theory_store
 from quantdash.data.source import DuckDBSource, SnowflakeConfig, SnowflakeSource
 from quantdash.data.seed import seed
-from quantdash.data.universe import DEFAULT_UNIVERSE
-from quantdash.ui import inject_css
+from quantdash.data.universe import BENCHMARKS, DEFAULT_UNIVERSE, INSURANCE_TICKERS
+from quantdash.engine.snowflake_utilities import HAVE_FIRM_UTILS
+from quantdash.ui import inject_css, page_header
 
-st.set_page_config(page_title="Data Explorer", page_icon="🗄️", layout="wide")
+st.set_page_config(page_title="Data Explorer — Insurance Alpha Lab",
+                   page_icon="🗄️", layout="wide")
 inject_css()
-st.title("🗄️ Data Explorer")
+page_header("Data Explorer", "Sources · coverage · seeding")
 
 
 @st.cache_resource
@@ -26,6 +28,7 @@ def _source():
 
 
 src = _source()
+read_only = getattr(src, "read_only", False)
 
 # ---------------- Connection status ----------------
 c1, c2 = st.columns(2)
@@ -34,18 +37,28 @@ with c1:
     st.metric("Backend", src.name)
     if src.name == "duckdb":
         st.caption(f"Local DuckDB at `{src.db_path}`")
+    elif read_only:
+        st.caption("Read-only Axioma feed: prices = cumulated `_1_DAY_RETURN` "
+                   "(WW4/SH), volume = `_20_DAY_ADV`, factors = "
+                   "`AXIOMA.FUNDAMENTAL.FACTOR_RETURN`. Theories persist to the "
+                   f"local DuckDB store (`{get_theory_store(src).db_path}`).")
 with c2:
     st.subheader("Snowflake")
+    if HAVE_FIRM_UTILS:
+        st.success("Firm `snowflake_utilities` detected — Axioma tables available "
+                   "(warehouse WHSE_TEAM_WILHELM_001).")
     cfg = SnowflakeConfig.from_env()
-    if cfg is None:
+    if cfg is None and not HAVE_FIRM_UTILS:
         st.warning(
-            "Not configured. Set env vars (or `.streamlit/secrets.toml`):\n\n"
-            "`SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD` "
-            "(or `SNOWFLAKE_PRIVATE_KEY_PATH`), `SNOWFLAKE_WAREHOUSE`, "
-            "`SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`"
+            "Not configured. Either install the firm `snowflake_utilities` "
+            "package (Axioma path) or set env vars: `SNOWFLAKE_ACCOUNT`, "
+            "`SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD` (or "
+            "`SNOWFLAKE_PRIVATE_KEY_PATH`), `SNOWFLAKE_WAREHOUSE`, "
+            "`SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`.\n\n"
+            "Force a specific backend with `QUANTDASH_SOURCE=axioma|snowflake|duckdb`."
         )
-    else:
-        st.success(f"Configured: {cfg.account} / {cfg.database}.{cfg.schema}")
+    elif cfg is not None:
+        st.success(f"Env credentials: {cfg.account} / {cfg.database}.{cfg.schema}")
         if st.button("Test connection"):
             try:
                 sf = SnowflakeSource(cfg)
@@ -76,10 +89,17 @@ st.divider()
 
 # ---------------- Seeding ----------------
 st.subheader("Seed / refresh data")
-target = st.radio("Target", ["Active source", "Snowflake (explicit)"], horizontal=True)
+if read_only:
+    st.info("The active Axioma source is **read-only** — nothing to seed. "
+            "Seeding below targets the **local DuckDB cache** so the lab also "
+            "works offline (`QUANTDASH_SOURCE=duckdb`).")
+target = st.radio(
+    "Target",
+    ["Local DuckDB" if read_only else "Active source", "Snowflake (explicit)"],
+    horizontal=True)
 uni = st.text_area(
-    "Tickers (comma-separated; SPY is always added as benchmark)",
-    value=", ".join(DEFAULT_UNIVERSE), height=120,
+    "Tickers (comma-separated; benchmarks SPY/KIE/IAK are always added)",
+    value=", ".join(INSURANCE_TICKERS + DEFAULT_UNIVERSE), height=120,
 )
 period = st.selectbox("History", ["2y", "5y", "10y", "max"], index=2)
 with_factors = st.checkbox("Also load Fama-French factors (FF5 + MOM)", value=True)
@@ -93,7 +113,7 @@ if st.button("🌱 Seed now", type="primary"):
             st.stop()
         dest = SnowflakeSource(cfg)
     else:
-        dest = src
+        dest = DuckDBSource() if read_only else src
     prog = st.status(f"Seeding {len(tickers)} tickers into {dest.name}...",
                      expanded=True)
     try:

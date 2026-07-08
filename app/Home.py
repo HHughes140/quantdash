@@ -11,7 +11,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from quantdash.data import get_source
+from quantdash.data import get_source, get_theory_store
+from quantdash.data.universe import BENCHMARKS, INSURANCE_UNIVERSE, SUBSECTOR
 from quantdash.engine import (
     SIGNAL_PRESETS,
     BacktestConfig,
@@ -31,10 +32,11 @@ from quantdash.engine.factors import factor_exposure_heatmap_data
 from quantdash.engine.metrics import drawdown_series, monthly_return_table
 from quantdash.ui import (
     ACCENT, CYAN, FACTOR_COLORS, GOLD, GRAY, GREEN, PURPLE, RED,
-    diverging_colors, inject_css, style_fig,
+    SUBSECTOR_COLORS, diverging_colors, factor_color, inject_css, page_header,
+    style_fig, with_alpha,
 )
 
-st.set_page_config(page_title="Quant Backtest Lab", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Insurance Alpha Lab", page_icon="🏛️", layout="wide")
 inject_css()
 
 
@@ -53,13 +55,20 @@ def _load_factors(start: str, end: str) -> pd.DataFrame:
     return _source().get_factors(start=start, end=end)
 
 
+@st.cache_resource
+def _theories():
+    return get_theory_store(_source())
+
+
 src = _source()
-st.title("📈 Quant Backtest Lab")
-st.caption(
-    f"Data source: **{src.name}**"
-    + (" (local cache — configure SNOWFLAKE_* env vars to use Snowflake)"
-       if src.name == "duckdb" else "")
-)
+_SOURCE_BADGES = {
+    "snowflake_axioma_read_only": "Axioma WW4 · Snowflake",
+    "snowflake": "Snowflake",
+    "duckdb": "Local cache",
+}
+page_header("Insurance Alpha Lab",
+            "Signal research · factor overlays · theory testing",
+            badge=_SOURCE_BADGES.get(src.name, src.name))
 
 tickers_all = src.available_tickers()
 if not tickers_all:
@@ -73,12 +82,32 @@ if not tickers_all:
 with st.sidebar:
     st.header("Experiment")
 
-    universe_mode = st.radio("Universe", ["All available", "Custom"], horizontal=True)
-    if universe_mode == "Custom":
+    insurance_avail = [t for t in tickers_all if t in SUBSECTOR]
+    universe_opts = (["Insurance", "Insurance subsectors"] if insurance_avail else []) \
+        + ["All available", "Custom"]
+    universe_mode = st.radio("Universe", universe_opts, horizontal=True)
+    if universe_mode == "Insurance":
+        tickers = insurance_avail
+        st.caption(f"{len(tickers)} insurance names across "
+                   f"{len({SUBSECTOR[t] for t in tickers})} subsectors")
+    elif universe_mode == "Insurance subsectors":
+        subs = st.multiselect("Subsectors", list(INSURANCE_UNIVERSE),
+                              default=list(INSURANCE_UNIVERSE)[:4])
+        tickers = [t for t in insurance_avail if SUBSECTOR[t] in subs]
+    elif universe_mode == "Custom":
         tickers = st.multiselect("Tickers", tickers_all,
                                  default=tickers_all[: min(50, len(tickers_all))])
     else:
-        tickers = [t for t in tickers_all if t != "SPY"]
+        tickers = [t for t in tickers_all if t not in BENCHMARKS]
+
+    bench_avail = [b for b in BENCHMARKS if b in tickers_all]
+    if bench_avail:
+        default_bench = ("KIE" if "KIE" in bench_avail
+                         and universe_mode.startswith("Insurance") else bench_avail[0])
+        bench_ticker = st.selectbox("Benchmark", bench_avail,
+                                    index=bench_avail.index(default_bench))
+    else:
+        bench_ticker = None
 
     cov = src.coverage()
     dmin, dmax = pd.to_datetime(cov["start"].min()), pd.to_datetime(cov["end"].max())
@@ -131,7 +160,8 @@ if run:
         s, e = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
         prices = _load_panel(tuple(sorted(tickers)), s, e, "adj_close")
         volume = _load_panel(tuple(sorted(tickers)), s, e, "volume")
-        bench = _load_panel(("SPY",), s, e, "adj_close")
+        bench = (_load_panel((bench_ticker,), s, e, "adj_close")
+                 if bench_ticker else pd.DataFrame())
         factors = _load_factors(s, e)
 
         if prices.empty:
@@ -154,7 +184,7 @@ if run:
         )
         try:
             result = run_backtest(prices, signal, cfg,
-                                  bench["SPY"] if not bench.empty else None)
+                                  bench[bench_ticker] if not bench.empty else None)
         except ValueError as err:
             st.error(str(err))
             st.stop()
@@ -162,6 +192,7 @@ if run:
         st.session_state.update(
             result=result, prices=prices, factors=factors,
             expression=expression, cfg=cfg, signal=signal, oos_frac=oos_frac,
+            bench_ticker=bench_ticker if not bench.empty else None,
         )
 
 if "result" not in st.session_state:
@@ -172,6 +203,7 @@ result = st.session_state["result"]
 prices = st.session_state["prices"]
 factors = st.session_state["factors"]
 cfg = st.session_state["cfg"]
+bench_label = st.session_state.get("bench_ticker") or "benchmark"
 
 gross_ann = (1 + result.gross_returns.dropna()).prod() ** (252 / len(result.gross_returns.dropna())) - 1
 net_ann = (1 + result.net_returns.dropna()).prod() ** (252 / len(result.net_returns.dropna())) - 1
@@ -187,9 +219,9 @@ if oos_frac_used > 0:
     ridx = result.net_returns.index
     split_date = ridx[int(len(ridx) * (1 - oos_frac_used))]
 
-tab_ov, tab_win, tab_fac, tab_sig, tab_num, tab_cmp = st.tabs(
-    ["Overview", "Winners & Losers", "Factor Overlays", "Signal Diagnostics",
-     "All the Numbers", "Compare"])
+tab_ov, tab_win, tab_sec, tab_fac, tab_sig, tab_num, tab_cmp = st.tabs(
+    ["Overview", "Winners & Losers", "Sector Lens", "Factor Overlays",
+     "Signal Diagnostics", "All the Numbers", "Compare"])
 
 # ---------------- Overview ----------------
 with tab_ov:
@@ -205,7 +237,7 @@ with tab_ov:
     row2 = st.columns(6)
     row2[0].metric("Sortino", f"{m['sortino']:.2f}" if m.get("sortino") else "—")
     row2[1].metric("Calmar", f"{m['calmar']:.2f}" if m.get("calmar") else "—")
-    row2[2].metric("Beta (SPY)", f"{m.get('beta', float('nan')):.2f}"
+    row2[2].metric(f"Beta ({bench_label})", f"{m.get('beta', float('nan')):.2f}"
                    if "beta" in m else "—")
     row2[3].metric("CAPM α (ann)", f"{m.get('capm_alpha_ann', 0):.1%}"
                    if "capm_alpha_ann" in m else "—")
@@ -257,9 +289,9 @@ with tab_ov:
                   row=1, col=1)
     if result.benchmark_returns is not None:
         beq = (1 + result.benchmark_returns.fillna(0)).cumprod()
-        fig.add_trace(go.Scatter(x=beq.index, y=beq, name="SPY",
+        fig.add_trace(go.Scatter(x=beq.index, y=beq, name=bench_label,
                                  line=dict(width=1.4, color="#6B7280"),
-                                 hovertemplate="%{y:.2f}<extra>SPY</extra>"),
+                                 hovertemplate="%{y:.2f}<extra>" + bench_label + "</extra>"),
                       row=1, col=1)
     fig.add_trace(go.Scatter(x=result.equity.index, y=result.equity,
                              name="Strategy (net)",
@@ -280,7 +312,7 @@ with tab_ov:
                       annotation_position="top left",
                       annotation_font=dict(size=11, color="#8B93A7"),
                       row=1, col=1)
-    style_fig(fig, height=560, title="Growth of $1 — net vs gross vs SPY")
+    style_fig(fig, height=560, title=f"Growth of $1 — net vs gross vs {bench_label}")
     fig.update_yaxes(type="log" if log_scale else "linear", row=1, col=1)
     fig.update_yaxes(tickformat=".0%", row=2, col=1)
     fig.update_xaxes(
@@ -319,7 +351,7 @@ with tab_win:
         bench_ret = (1 + result.benchmark_returns.loc[p_start:p_end].fillna(0)).prod() - 1
     m1, m2, m3 = st.columns(3)
     m1.metric("Strategy return", f"{period_ret:.1%}")
-    m2.metric("SPY return", f"{bench_ret:.1%}" if bench_ret is not None else "—")
+    m2.metric(f"{bench_label} return", f"{bench_ret:.1%}" if bench_ret is not None else "—")
     m3.metric("Active", f"{period_ret - bench_ret:+.1%}" if bench_ret is not None else "—")
 
     contrib = position_contribution(result.weights, prices, p_start, p_end)
@@ -455,13 +487,94 @@ with tab_win:
                    "and its portfolio weight (blue area). If the green stretches sit "
                    "on downtrends, the signal is entering too early or exiting too late.")
 
+# ---------------- Sector Lens ----------------
+with tab_sec:
+    sub_of = {t: SUBSECTOR.get(t, "Other") for t in result.weights.columns}
+    mapped = [t for t in result.weights.columns if t in SUBSECTOR]
+    if not mapped:
+        st.info("No insurance names in this universe — pick an Insurance "
+                "universe in the sidebar to use the Sector Lens.")
+    else:
+        w = result.weights
+        by_sub = w.T.groupby(pd.Series(sub_of)).sum().T
+        by_sub = by_sub.loc[:, by_sub.abs().max() > 1e-9]
+        gross_sub = w.abs().T.groupby(pd.Series(sub_of)).sum().T
+        gross_sub = gross_sub.loc[:, gross_sub.max() > 1e-9]
+
+        # Gross exposure mix over time (stacked, weekly)
+        gw = gross_sub.resample("W").mean()
+        share = gw.div(gw.sum(axis=1).replace(0, np.nan), axis=0)
+        fig_mix = go.Figure()
+        for subname in share.columns:
+            fig_mix.add_trace(go.Scatter(
+                x=share.index, y=share[subname], name=subname,
+                stackgroup="mix", mode="none",
+                fillcolor=with_alpha(SUBSECTOR_COLORS.get(subname, GRAY), 0.65),
+                hovertemplate="%{y:.0%}<extra>" + subname + "</extra>"))
+        style_fig(fig_mix, height=360, ytickformat=".0%",
+                  title="Gross exposure mix by subsector (weekly avg)")
+        fig_mix.update_yaxes(range=[0, 1])
+        st.plotly_chart(fig_mix, use_container_width=True)
+
+        sc1, sc2 = st.columns(2)
+        # Current net weight by subsector
+        cur_net = by_sub.iloc[-1].sort_values()
+        fig_net = go.Figure(go.Bar(
+            x=cur_net.values, y=cur_net.index, orientation="h",
+            marker=dict(color=diverging_colors(cur_net.values),
+                        line=dict(width=0)),
+            text=[f"{v:+.1%}" for v in cur_net.values], textposition="outside",
+            cliponaxis=False))
+        style_fig(fig_net, height=320, hover="closest", show_legend=False,
+                  title="Current net weight by subsector")
+        fig_net.update_layout(xaxis_tickformat=".0%", bargap=0.35)
+        sc1.plotly_chart(fig_net, use_container_width=True)
+
+        # P&L contribution by subsector (full backtest)
+        contrib_full = position_contribution(result.weights, prices)
+        if not contrib_full.empty:
+            csub = contrib_full["contribution"].groupby(
+                contrib_full.index.map(lambda t: sub_of.get(t, "Other"))).sum() \
+                .sort_values()
+            fig_cs = go.Figure(go.Bar(
+                x=csub.values, y=csub.index, orientation="h",
+                marker=dict(color=diverging_colors(csub.values),
+                            line=dict(width=0)),
+                text=[f"{v:+.2%}" for v in csub.values], textposition="outside",
+                cliponaxis=False))
+            style_fig(fig_cs, height=320, hover="closest", show_legend=False,
+                      title="P&L contribution by subsector (full backtest)")
+            fig_cs.update_layout(xaxis_tickformat=".1%", bargap=0.35)
+            sc2.plotly_chart(fig_cs, use_container_width=True)
+
+        # Subsector performance: equal-weight cumulative return per subsector
+        st.subheader("Subsector tape (equal-weight, growth of $1)")
+        rets_all = prices[mapped].pct_change(fill_method=None)
+        fig_tape = go.Figure()
+        for subname in sorted({sub_of[t] for t in mapped}):
+            members = [t for t in mapped if sub_of[t] == subname]
+            if len(members) < 2:
+                continue
+            eq = (1 + rets_all[members].mean(axis=1).fillna(0)).cumprod()
+            fig_tape.add_trace(go.Scatter(
+                x=eq.index, y=eq, name=f"{subname} ({len(members)})",
+                line=dict(width=1.8, color=SUBSECTOR_COLORS.get(subname, GRAY)),
+                hovertemplate="%{y:.2f}<extra>" + subname + "</extra>"))
+        style_fig(fig_tape, height=400)
+        st.plotly_chart(fig_tape, use_container_width=True)
+        st.caption("Where the cycle is: brokers compounding through everything, "
+                   "P&C riding the hard market, life tracking rates — check the "
+                   "strategy's subsector mix against which tapes are working.")
+
 # ---------------- Factor overlays ----------------
 with tab_fac:
     if factors.empty:
         st.warning("No factor data — seed factors in Data Explorer.")
     else:
-        avail = [c for c in ["MKT_RF", "SMB", "HML", "RMW", "CMA", "MOM"]
-                 if c in factors.columns]
+        # Factor list is discovered from the data source: FF5+MOM locally,
+        # Axioma WW4 style factors on the desk, and anything a custom factor
+        # loader writes shows up here automatically.
+        avail = [c for c in factors.columns if str(c).upper() != "RF"]
         chosen = st.multiselect("Factors", avail, default=avail)
         fac = factors[chosen + (["RF"] if "RF" in factors.columns else [])]
 
@@ -528,12 +641,12 @@ with tab_fac:
             roll = rolling_factor_betas(result.net_returns, fac, window=126)
             if not roll.empty:
                 fig_b = go.Figure()
-                for col in roll.columns:
-                    if col == "alpha_ann":
-                        continue
+                beta_cols = [c for c in roll.columns
+                             if c not in ("alpha_ann", "r_squared")]
+                for i, col in enumerate(beta_cols):
                     fig_b.add_trace(go.Scatter(
                         x=roll.index, y=roll[col], name=col,
-                        line=dict(width=2, color=FACTOR_COLORS.get(col)),
+                        line=dict(width=2, color=factor_color(col, i)),
                         hovertemplate="%{y:.2f}<extra>" + col + "</extra>"))
                 style_fig(fig_b, height=360, title="Rolling 6-month factor betas")
                 st.plotly_chart(fig_b, use_container_width=True)
@@ -690,7 +803,7 @@ with tab_cmp:
                 hovertemplate="%{y:.2f}<extra>" + name[:24] + "</extra>"))
         if result.benchmark_returns is not None:
             beq = (1 + result.benchmark_returns.fillna(0)).cumprod()
-            fig_cmp.add_trace(go.Scatter(x=beq.index, y=beq, name="SPY",
+            fig_cmp.add_trace(go.Scatter(x=beq.index, y=beq, name=bench_label,
                                          line=dict(width=1.2, color="#6B7280",
                                                    dash="dot")))
         style_fig(fig_cmp, height=440, title="Snapshotted runs — growth of $1")
@@ -739,7 +852,7 @@ with st.expander("💾 Save this run to the Theory Journal"):
                      "ann_vol", "max_drawdown", "capm_alpha_ann", "beta",
                      "ann_turnover", "ann_cost_drag", "ic_mean", "ic_tstat",
                      "hit_rate", "start", "end", "n_days"]
-        _source().save_theory(
+        _theories().save_theory(
             name=tname, hypothesis=thesis,
             expression=st.session_state["expression"],
             config=cfg.to_dict(),

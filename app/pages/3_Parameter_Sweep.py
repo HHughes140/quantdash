@@ -18,11 +18,13 @@ import streamlit as st
 from quantdash.data import get_source
 from quantdash.engine import (BacktestConfig, compute_metrics, evaluate_signal,
                               run_backtest)
-from quantdash.ui import ACCENT, GREEN, RED, diverging_colors, inject_css, style_fig
+from quantdash.data.universe import BENCHMARKS
+from quantdash.ui import ACCENT, GREEN, RED, diverging_colors, inject_css, page_header, style_fig
 
-st.set_page_config(page_title="Parameter Sweep", page_icon="🎛️", layout="wide")
+st.set_page_config(page_title="Parameter Sweep — Insurance Alpha Lab",
+                   page_icon="🎛️", layout="wide")
 inject_css()
-st.title("🎛️ Parameter Sweep")
+page_header("Parameter Sweep", "Robustness across the parameter grid")
 st.caption("A real effect is robust to its parameters — look for a plateau, "
            "not a spike. Metrics below are computed on the OOS segment to keep "
            "the sweep honest.")
@@ -38,7 +40,7 @@ def _source():
 @st.cache_data(ttl=3600, show_spinner=False)
 def _panels():
     src = _source()
-    tickers = [t for t in src.available_tickers() if t != "SPY"]
+    tickers = [t for t in src.available_tickers() if t not in BENCHMARKS]
     prices = src.get_price_panel(tickers)
     volume = src.get_price_panel(tickers, field="volume")
     bench = src.get_price_panel(["SPY"])

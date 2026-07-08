@@ -14,7 +14,7 @@ import pandas as pd
 import requests
 
 from .source import DataSource
-from .universe import DEFAULT_UNIVERSE
+from .universe import BENCHMARKS, DEFAULT_UNIVERSE
 
 FRENCH_BASE = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp"
 FF5_DAILY = f"{FRENCH_BASE}/F-F_Research_Data_5_Factors_2x3_daily_CSV.zip"
@@ -131,8 +131,8 @@ def seed(
     include_factors: bool = True,
     log=print,
 ) -> dict:
-    """Seed prices (+SPY benchmark) and factors into the given source."""
-    tickers = list(dict.fromkeys(list(tickers or DEFAULT_UNIVERSE) + ["SPY"]))
+    """Seed prices (+benchmark ETFs) and factors into the given source."""
+    tickers = list(dict.fromkeys(list(tickers or DEFAULT_UNIVERSE) + BENCHMARKS))
     log(f"[seed] downloading {len(tickers)} tickers, period={period} ...")
     prices = fetch_prices(tickers, period=period)
     n_prices = source.write_prices(prices)

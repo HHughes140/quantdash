@@ -30,6 +30,8 @@ def position_contribution(
     w = weights.reindex(columns=prices.columns).fillna(0.0)
     sl = slice(start, end)
     w, rets = w.loc[sl], rets.loc[sl]
+    common = w.index.intersection(rets.index)
+    w, rets = w.loc[common], rets.loc[common]
 
     contrib = (w * rets).sum()
     held_mask = w.abs() > 1e-9

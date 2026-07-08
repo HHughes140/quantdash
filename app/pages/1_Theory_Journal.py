@@ -10,22 +10,22 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from quantdash.data import get_source
-from quantdash.ui import GREEN, inject_css, style_fig
+from quantdash.data import get_theory_store
+from quantdash.ui import GREEN, inject_css, page_header, style_fig
 
-st.set_page_config(page_title="Theory Journal", page_icon="📓", layout="wide")
+st.set_page_config(page_title="Theory Journal — Insurance Alpha Lab",
+                   page_icon="📓", layout="wide")
 inject_css()
-st.title("📓 Theory Journal")
-st.caption("Every hypothesis you've tested, with the numbers that confirmed or "
-           "killed it. Save runs from the Backtest Lab.")
+page_header("Theory Journal",
+            "Every hypothesis tested — and the numbers that confirmed or killed it")
 
 
 @st.cache_resource
-def _source():
-    return get_source()
+def _store():
+    return get_theory_store()
 
 
-src = _source()
+src = _store()
 theories = src.list_theories()
 
 if theories.empty:

@@ -52,6 +52,7 @@ class DataSource:
     """Interface. Concrete classes implement _query/_execute/_insert_df."""
 
     name: str = "abstract"
+    read_only: bool = False
 
     # ---- backend primitives -------------------------------------------------
     def _query(self, sql: str, params: Optional[list] = None) -> pd.DataFrame:
@@ -351,18 +352,45 @@ class SnowflakeSource(DataSource):
 def get_source(prefer: str = "auto") -> DataSource:
     """Resolve the active data source.
 
-    prefer='auto' uses Snowflake when credentials are configured, else DuckDB.
+    Priority (prefer='auto'):
+      1. QUANTDASH_SOURCE env override: 'axioma' | 'snowflake' | 'duckdb'
+      2. Firm snowflake_utilities installed -> read-only Axioma source
+      3. SNOWFLAKE_* env credentials      -> self-seeded Snowflake tables
+      4. Local DuckDB cache
     """
-    if prefer in ("auto", "snowflake"):
+    override = os.environ.get("QUANTDASH_SOURCE", "").lower() or prefer
+
+    if override in ("axioma", "auto"):
+        from quantdash.engine.snowflake_utilities import HAVE_FIRM_UTILS
+
+        if HAVE_FIRM_UTILS or override == "axioma":
+            try:
+                from .axioma import SnowflakeUtilitiesSource
+
+                return SnowflakeUtilitiesSource()
+            except Exception:
+                if override == "axioma":
+                    raise
+
+    if override in ("auto", "snowflake"):
         cfg = SnowflakeConfig.from_env()
         if cfg is not None:
             try:
                 return SnowflakeSource(cfg)
             except Exception:
-                if prefer == "snowflake":
+                if override == "snowflake":
                     raise
-        elif prefer == "snowflake":
+        elif override == "snowflake":
             raise RuntimeError(
                 "Snowflake requested but SNOWFLAKE_ACCOUNT / SNOWFLAKE_USER not set."
             )
     return DuckDBSource()
+
+
+def get_theory_store(active: Optional[DataSource] = None) -> DataSource:
+    """Where theories are persisted. Read-only market sources (Axioma) can't
+    store them, so fall back to the local DuckDB file."""
+    src = active if active is not None else get_source()
+    if getattr(src, "read_only", False):
+        return DuckDBSource()
+    return src

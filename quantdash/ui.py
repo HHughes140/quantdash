@@ -17,6 +17,7 @@ GRID = "rgba(255,255,255,0.07)"
 AXIS = "#2A3247"
 
 FACTOR_COLORS = {
+    # Fama-French
     "MKT_RF": GRAY,
     "SMB": CYAN,
     "HML": GOLD,
@@ -25,6 +26,41 @@ FACTOR_COLORS = {
     "MOM": RED,
     "Risk-free": "#5A6478",
     "Residual (alpha)": GREEN,
+    # Axioma WW4 style factors
+    "MARKET_SENSITIVITY": GRAY,
+    "SIZE": CYAN,
+    "VALUE": GOLD,
+    "PROFITABILITY": PURPLE,
+    "GROWTH": "#6FBF9B",
+    "MEDIUM_TERM_MOMENTUM": RED,
+    "SHORT_TERM_MOMENTUM": "#FF8A65",
+    "VOLATILITY": "#F06292",
+    "LEVERAGE": "#A1887F",
+    "LIQUIDITY": "#4DB6AC",
+    "EARNINGS_YIELD": "#DCE775",
+    "DIVIDEND_YIELD": "#90A4AE",
+    "EXCHANGE_RATE_SENSITIVITY": "#7986CB",
+}
+
+_COLORWAY = [ACCENT, GOLD, GREEN, PURPLE, CYAN, RED, "#FF8A65", "#4DB6AC",
+             "#DCE775", "#F06292", "#7986CB", "#A1887F", "#90A4AE"]
+
+
+def factor_color(name: str, i: int = 0) -> str:
+    """Stable color for any factor name, known or not (for custom loaders)."""
+    return FACTOR_COLORS.get(name, _COLORWAY[i % len(_COLORWAY)])
+
+
+SUBSECTOR_COLORS = {
+    "P&C": ACCENT,
+    "Specialty & E&S": GOLD,
+    "Life & Retirement": PURPLE,
+    "Reinsurance": CYAN,
+    "Brokers & Services": GREEN,
+    "Health": RED,
+    "Title & Mortgage": "#A1887F",
+    "Insurtech": "#F06292",
+    "Other": GRAY,
 }
 
 
@@ -61,6 +97,12 @@ def style_fig(
     if ytickformat:
         fig.update_yaxes(tickformat=ytickformat)
     return fig
+
+
+def with_alpha(hex_color: str, alpha: float) -> str:
+    """'#RRGGBB' -> 'rgba(r,g,b,a)' (plotly doesn't accept 8-digit hex)."""
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return f"rgba({r},{g},{b},{alpha:.2f})"
 
 
 def diverging_colors(values, pos=GREEN, neg=RED) -> list[str]:
@@ -120,3 +162,30 @@ def inject_css() -> None:
     import streamlit as st
 
     st.markdown(CSS, unsafe_allow_html=True)
+
+
+def page_header(title: str, subtitle: str, badge: str | None = None) -> None:
+    """High-end page masthead: title, hairline rule, small-caps subtitle."""
+    import streamlit as st
+
+    badge_html = (
+        f'<span style="background:rgba(91,141,239,.12);border:1px solid #2A3247;'
+        f'border-radius:999px;padding:3px 12px;font-size:.68rem;'
+        f'letter-spacing:.08em;text-transform:uppercase;color:#8FB0FF;'
+        f'vertical-align:middle;margin-left:14px;">{badge}</span>'
+        if badge else ""
+    )
+    st.markdown(
+        f"""
+        <div style="padding:4px 0 2px 0;">
+          <span style="font-size:1.9rem;font-weight:700;letter-spacing:-.02em;
+                       color:#E6E9F0;">{title}</span>{badge_html}
+          <div style="font-size:.8rem;letter-spacing:.14em;text-transform:uppercase;
+                      color:#8B93A7;margin-top:2px;">{subtitle}</div>
+          <div style="height:2px;width:64px;
+                      background:linear-gradient(90deg,#5B8DEF,rgba(91,141,239,0));
+                      margin:12px 0 4px 0;border-radius:2px;"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )

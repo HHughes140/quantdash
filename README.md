@@ -1,10 +1,28 @@
-# Quant Backtest Lab
+# Insurance Alpha Lab
 
-Interactive quant backtesting dashboard: write a signal as a one-line
-expression, backtest it in under a second, see every relevant number
-(Sharpe with Lo correction + bootstrap CI, factor-adjusted alpha with
-Newey-West t-stats, IC, quintile spreads, turnover/cost drag), and log the
-hypothesis + verdict in a theory journal.
+Interactive alpha-research dashboard for the US insurance complex: write a
+signal as a one-line expression, backtest it in under a second across the
+insurance universe (P&C, specialty/E&S, life, reinsurance, brokers, health,
+title, insurtech), see every relevant number (Sharpe with Lo correction +
+bootstrap CI, factor-adjusted alpha with Newey-West t-stats, IC, quintile
+spreads, turnover/cost drag), decompose exposure by subsector and factor,
+and log the hypothesis + verdict in a theory journal.
+
+## Data backends
+
+Resolved automatically by `get_source()` (`quantdash/data/source.py`):
+
+1. **Axioma / Snowflake (read-only)** — on desks where the internal
+   `snowflake_utilities` package is installed. Prices are synthetic
+   total-return indexes cumulated from `AXIOMA.FUNDAMENTAL.STOCKS`
+   `_1_DAY_RETURN` (WW4/SH), volume proxied by `_20_DAY_ADV`, and factor
+   returns come from `AXIOMA.FUNDAMENTAL.FACTOR_RETURN` (13 WW4 style
+   factors). Theories persist to the local DuckDB store since this source is
+   read-only.
+2. **Self-seeded Snowflake** — when SNOWFLAKE_* env vars are set.
+3. **Local DuckDB** — offline fallback, seeded from yfinance + Ken French.
+
+Force one with `QUANTDASH_SOURCE=axioma|snowflake|duckdb`.
 
 ## Quick start
 
