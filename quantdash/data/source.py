@@ -48,6 +48,10 @@ DDL = [
     """CREATE TABLE IF NOT EXISTS MACRO (
         date DATE, series VARCHAR, value DOUBLE
     )""",
+    """CREATE TABLE IF NOT EXISTS SNAPSHOTS (
+        name VARCHAR, expression VARCHAR, config_json VARCHAR,
+        metrics_json VARCHAR, returns_json VARCHAR, created_at TIMESTAMP
+    )""",
 ]
 
 
@@ -208,6 +212,42 @@ class DataSource:
         self._execute(f"DELETE FROM MACRO WHERE series IN ({placeholders})", names)
         self._insert_df("MACRO", df[["date", "series", "value"]])
         return len(df)
+
+    # ---- compare snapshots ---------------------------------------------------------
+    def save_snapshot(self, name: str, expression: str, config: dict,
+                      metrics: dict, returns: pd.Series) -> None:
+        self._execute("DELETE FROM SNAPSHOTS WHERE name = ?", [name])
+        returns_json = json.dumps(
+            {str(k.date()): float(v) for k, v in returns.dropna().items()})
+        self._execute(
+            "INSERT INTO SNAPSHOTS VALUES (?, ?, ?, ?, ?, ?)",
+            [name, expression, json.dumps(config, default=str),
+             json.dumps(metrics, default=float), returns_json,
+             datetime.now(timezone.utc).replace(tzinfo=None)])
+
+    def list_snapshots(self) -> dict:
+        """name -> {returns: Series, metrics, expression, config}."""
+        df = self._query("SELECT * FROM SNAPSHOTS ORDER BY created_at")
+        out = {}
+        for _, row in df.iterrows():
+            try:
+                rets = pd.Series(json.loads(row["returns_json"]))
+                rets.index = pd.to_datetime(rets.index)
+                out[row["name"]] = {
+                    "returns": rets.sort_index(),
+                    "metrics": json.loads(row["metrics_json"] or "{}"),
+                    "expression": row["expression"],
+                    "config": json.loads(row["config_json"] or "{}"),
+                }
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return out
+
+    def delete_snapshot(self, name: str) -> None:
+        self._execute("DELETE FROM SNAPSHOTS WHERE name = ?", [name])
+
+    def clear_snapshots(self) -> None:
+        self._execute("DELETE FROM SNAPSHOTS")
 
     # ---- theories ----------------------------------------------------------------
     def save_theory(

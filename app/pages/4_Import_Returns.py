@@ -126,7 +126,7 @@ fig.add_trace(go.Scatter(x=dd.index, y=dd, fill="tozeroy", showlegend=False,
               row=2, col=1)
 style_fig(fig, height=480, title=f"{label} — growth of $1")
 fig.update_yaxes(tickformat=".0%", row=2, col=1)
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # ---------------- Factor overlay ----------------
 factors = _factors()
@@ -156,7 +156,7 @@ else:
             .map(lambda v: "background-color: rgba(255,165,0,.25)"
                  if isinstance(v, float) and abs(v) > 2 else "",
                  subset=["t-stat"]),
-            use_container_width=True)
+            width="stretch")
 
         roll = rolling_factor_betas(series, fac, window=126)
         if not roll.empty:
@@ -169,19 +169,19 @@ else:
                     line=dict(width=2, color=factor_color(col, i)),
                     hovertemplate="%{y:.2f}<extra>" + col + "</extra>"))
             style_fig(fig_b, height=360, title="Rolling 6-month factor betas")
-            st.plotly_chart(fig_b, use_container_width=True)
+            st.plotly_chart(fig_b, width="stretch")
 
 # ---------------- Actions ----------------
 st.divider()
 a1, a2 = st.columns(2)
-if a1.button("➕ Add to Compare (Backtest Lab tab)", use_container_width=True):
+if a1.button("➕ Add to Compare (Backtest Lab tab)", width="stretch"):
     snap_metrics = {k: v for k, v in m.items() if not isinstance(v, (tuple, str))}
     st.session_state.setdefault("compare", {})[label] = {
         "returns": series, "metrics": snap_metrics,
         "expression": f"[imported] {up.name}", "config": {"source": "import"},
     }
     a1.success("Added — open the Compare tab on the Backtest Lab page.")
-if a2.button("💾 Save to Theory Journal", use_container_width=True):
+if a2.button("💾 Save to Theory Journal", width="stretch"):
     keep = ["sharpe", "sharpe_lo_corrected", "sharpe_p_value", "ann_return",
             "ann_vol", "max_drawdown", "hit_rate", "start", "end", "n_days"]
     get_theory_store(_source()).save_theory(

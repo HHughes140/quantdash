@@ -192,7 +192,7 @@ if meta["has_b"]:
               title=f"{meta['metric']} across the grid")
     fig.update_xaxes(title="A", type="category")
     fig.update_yaxes(title="B", type="category")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 else:
     fig = go.Figure(go.Bar(
         x=[str(a) for a in ok["A"]], y=ok["objective"],
@@ -204,7 +204,7 @@ else:
               title=f"{meta['metric']} by A")
     fig.update_layout(bargap=0.4)
     fig.update_xaxes(title="A", type="category")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 # IS vs OOS scatter — the overfitting picture
 fig_sc = go.Figure()
@@ -222,7 +222,7 @@ style_fig(fig_sc, height=380, hover="closest", show_legend=False,
                 "degrade OOS)")
 fig_sc.update_xaxes(title="IS Sharpe")
 fig_sc.update_yaxes(title="OOS Sharpe")
-st.plotly_chart(fig_sc, use_container_width=True)
+st.plotly_chart(fig_sc, width="stretch")
 
 show_cols = [c for c in ["label", "IS Sharpe", "OOS Sharpe", "Full Sharpe",
                          "OOS ann ret", "OOS max DD", "OOS IC t", "turnover"]
@@ -232,6 +232,6 @@ st.dataframe(
         "IS Sharpe": "{:.2f}", "OOS Sharpe": "{:.2f}", "Full Sharpe": "{:.2f}",
         "OOS ann ret": "{:.1%}", "OOS max DD": "{:.1%}", "OOS IC t": "{:.2f}",
         "turnover": "{:.0%}"}, na_rep="—"),
-    use_container_width=True, hide_index=True)
+    width="stretch", hide_index=True)
 st.caption("Robustness read: adjacent parameter values should have similar OOS "
            "numbers. One spike surrounded by noise = you found luck, not signal.")

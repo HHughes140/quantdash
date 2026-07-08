@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -121,6 +123,123 @@ def _bootstrap_sharpe_ci(
         sd = sample.std()
         sharpes[i] = sample.mean() / sd * np.sqrt(ANN) if sd > 0 else 0.0
     return tuple(np.percentile(sharpes, [2.5, 97.5]))
+
+
+def deflated_sharpe(
+    returns: pd.Series,
+    trial_sharpes: Sequence[float] | None = None,
+) -> dict:
+    """Bailey & López de Prado deflated Sharpe ratio.
+
+    trial_sharpes: annualized Sharpes of ALL strategies tried during the
+    research process (including this one). The more you tried, the higher the
+    hurdle SR0; DSR is the probability the true Sharpe exceeds that hurdle.
+    """
+    r = returns.dropna()
+    n = len(r)
+    if n < 40 or r.std() == 0:
+        return {"dsr": np.nan, "sr0_ann": np.nan, "n_trials": 0}
+    sr = float(r.mean() / r.std())  # daily units
+    sk = float(r.skew())
+    ku = float(r.kurtosis()) + 3.0  # pandas kurtosis is excess
+
+    trials = [s for s in (trial_sharpes or []) if s is not None and np.isfinite(s)]
+    n_trials = max(len(trials), 1)
+    if n_trials > 1:
+        sr_std = float(np.std([s / np.sqrt(ANN) for s in trials], ddof=1))
+        sr_std = max(sr_std, 1e-6)
+        emc = 0.5772156649015329
+        sr0 = sr_std * ((1 - emc) * stats.norm.ppf(1 - 1 / n_trials)
+                        + emc * stats.norm.ppf(1 - 1 / (n_trials * np.e)))
+    else:
+        sr0 = 0.0
+
+    denom = 1 - sk * sr + (ku - 1) / 4 * sr**2
+    if denom <= 0:
+        return {"dsr": np.nan, "sr0_ann": float(sr0 * np.sqrt(ANN)),
+                "n_trials": n_trials}
+    dsr = float(stats.norm.cdf((sr - sr0) * np.sqrt(n - 1) / np.sqrt(denom)))
+    return {"dsr": dsr, "sr0_ann": float(sr0 * np.sqrt(ANN)),
+            "n_trials": n_trials}
+
+
+def ic_by_horizon(
+    signal: pd.DataFrame,
+    prices: pd.DataFrame,
+    horizons: Sequence[int] = (1, 5, 10, 21, 63),
+    sample_every: int = 5,
+) -> pd.DataFrame:
+    """Signal decay: mean cross-sectional rank IC at each forward horizon.
+
+    Returns DataFrame indexed by horizon with ic_mean, ic_tstat, n_obs.
+    """
+    rows = []
+    dates = signal.index[::sample_every]
+    for h in horizons:
+        fwd = prices.shift(-h) / prices - 1
+        ics = []
+        for dt in dates:
+            if dt not in fwd.index:
+                continue
+            pair = pd.concat([signal.loc[dt], fwd.loc[dt]], axis=1,
+                             keys=["sig", "fwd"]).dropna()
+            if len(pair) >= 10:
+                ics.append(pair["sig"].corr(pair["fwd"], method="spearman"))
+        ics = pd.Series(ics).dropna()
+        rows.append({
+            "horizon": h,
+            "ic_mean": float(ics.mean()) if len(ics) else np.nan,
+            "ic_tstat": float(ics.mean() / ics.std() * np.sqrt(len(ics)))
+            if len(ics) > 2 and ics.std() > 0 else np.nan,
+            "n_obs": int(len(ics)),
+        })
+    return pd.DataFrame(rows).set_index("horizon")
+
+
+def regime_table(
+    returns: pd.Series,
+    macro_series: pd.Series,
+    n_buckets: int = 3,
+    change_days: int = 63,
+) -> pd.DataFrame:
+    """Strategy performance conditioned on a macro series.
+
+    Buckets by level terciles (Low/Mid/High) and by direction of the trailing
+    `change_days` change (Falling/Rising). Macro values are lagged one day to
+    avoid conditioning on same-day information.
+    """
+    m = macro_series.reindex(returns.index).ffill().shift(1)
+    r = returns.dropna()
+    m = m.reindex(r.index)
+    ok = m.notna()
+    r, m = r[ok], m[ok]
+    if len(r) < 120:
+        return pd.DataFrame()
+
+    labels = ["Low", "Mid", "High"][:n_buckets]
+    try:
+        level_bucket = pd.qcut(m, n_buckets, labels=labels, duplicates="drop")
+    except ValueError:
+        return pd.DataFrame()
+    chg = m.diff(change_days)
+    dir_bucket = pd.Series(np.where(chg > 0, "Rising", "Falling"), index=m.index)
+    dir_bucket[chg.isna()] = None
+
+    rows = []
+    for name, bucket in [("level", level_bucket), ("direction", dir_bucket)]:
+        for lab in (labels if name == "level" else ["Falling", "Rising"]):
+            seg = r[bucket == lab]
+            if len(seg) < 40:
+                continue
+            rows.append({
+                "condition": f"{lab} {'' if name == 'level' else '(' + str(change_days) + 'd)'}".strip(),
+                "days": len(seg),
+                "ann_return": float((1 + seg).prod() ** (ANN / len(seg)) - 1),
+                "sharpe": float(seg.mean() / seg.std() * np.sqrt(ANN))
+                if seg.std() > 0 else np.nan,
+                "hit_rate": float((seg > 0).mean()),
+            })
+    return pd.DataFrame(rows)
 
 
 def drawdown_series(returns: pd.Series) -> pd.Series:

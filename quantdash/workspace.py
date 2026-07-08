@@ -15,6 +15,7 @@ WS_PATH = Path(__file__).resolve().parents[1] / "data" / "workspace.json"
 _DEFAULTS = {
     "signal_presets": {},   # name -> expression
     "universes": {},        # name -> [tickers]
+    "trials": [],           # [{h: expr+config hash, sharpe}] for deflated Sharpe
     "defaults": {
         "mode": "long_short",
         "quantile": 0.2,
@@ -38,6 +39,8 @@ def load_workspace() -> dict:
                     ws[key].update(saved[key])
             if isinstance(saved.get("defaults"), dict):
                 ws["defaults"].update(saved["defaults"])
+            if isinstance(saved.get("trials"), list):
+                ws["trials"] = saved["trials"]
         except (json.JSONDecodeError, OSError):
             pass  # corrupt/unreadable workspace: fall back to defaults
     return ws

@@ -24,6 +24,10 @@ class BacktestConfig:
     min_names: int = 10               # skip dates with fewer valid signals
     vol_target: Optional[float] = None  # e.g. 0.10 -> scale leverage to 10% ann vol
     benchmark: str = "SPY"
+    neutralize: Optional[str] = None  # None | "subsector": demean signal within group
+    beta_hedge: bool = False          # hedge rolling beta to benchmark (no-lookahead)
+    short_borrow_annual_bps: float = 0.0  # borrow cost on short notional
+    drift_weights: bool = False       # let weights drift with returns between rebalances
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -85,10 +89,18 @@ def run_backtest(
     signal: pd.DataFrame,
     config: Optional[BacktestConfig] = None,
     benchmark_prices: Optional[pd.Series] = None,
+    groups: Optional[dict] = None,
 ) -> BacktestResult:
+    """groups: ticker -> group label (e.g. subsector), used when
+    cfg.neutralize == 'subsector' to demean the signal within each group so the
+    strategy expresses stock selection rather than group tilts."""
     cfg = config or BacktestConfig()
     prices = prices.sort_index()
     signal = signal.reindex(index=prices.index, columns=prices.columns)
+    if cfg.neutralize == "subsector" and groups:
+        glabels = np.array([groups.get(c, "Other") for c in signal.columns])
+        signal = signal.sub(
+            signal.T.groupby(glabels).transform("mean").T)
     rets = prices.pct_change(fill_method=None)
 
     # Rebalance dates: every Nth trading day from the first date with enough signal
@@ -110,16 +122,56 @@ def run_backtest(
         if not w.empty:
             target.loc[dt, w.index] = w.values
 
-    # Effective daily weights: hold targets, applied from the next trading day
-    daily_w = target.reindex(all_dates).ffill().shift(1).fillna(0.0)
+    # Effective daily weights, applied from the day after the rebalance close.
+    if cfg.drift_weights:
+        # NAV-relative drift between rebalances: w' = w*(1+r)/(1+portfolio_ret)
+        ret_arr = rets.fillna(0.0).to_numpy()
+        n_assets = len(prices.columns)
+        w_arr = np.zeros((len(all_dates), n_assets))
+        trade_amt = np.zeros(len(all_dates))
+        rebal_set = set(target.index)
+        cur = np.zeros(n_assets)
+        pending = None  # target set at the previous close, trades at today's open
+        for i, dt in enumerate(all_dates):
+            if pending is not None:
+                trade_amt[i] = np.abs(pending - cur).sum()
+                cur = pending
+                pending = None
+            w_arr[i] = cur
+            r = ret_arr[i]
+            p = float(cur @ r)
+            if abs(1 + p) > 1e-9:
+                cur = cur * (1 + r) / (1 + p)
+            if dt in rebal_set:
+                pending = target.loc[dt].to_numpy(dtype=float)
+        daily_w = pd.DataFrame(w_arr, index=all_dates, columns=prices.columns)
+        dw = pd.Series(trade_amt, index=all_dates)
+    else:
+        daily_w = target.reindex(all_dates).ffill().shift(1).fillna(0.0)
+        dw = daily_w.diff().abs().sum(axis=1).fillna(0.0)
 
     gross_ret = (daily_w * rets).sum(axis=1)
 
-    # Costs: charged when weights change (the day new targets take effect)
-    dw = daily_w.diff().abs().sum(axis=1).fillna(0.0)
+    # Costs: traded notional x one-way bps, plus borrow on short notional
     costs = dw * (cfg.cost_bps / 1e4)
+    if cfg.short_borrow_annual_bps > 0:
+        short_notional = daily_w.clip(upper=0).abs().sum(axis=1)
+        costs = costs + short_notional * (cfg.short_borrow_annual_bps / 1e4 / 252)
     net_ret = gross_ret - costs
     turnover = (dw / 2).loc[dw > 0]
+
+    bench_daily = None
+    if benchmark_prices is not None and not benchmark_prices.empty:
+        bench_daily = benchmark_prices.reindex(all_dates).pct_change(fill_method=None)
+
+    # Optional beta hedge: subtract trailing-beta x benchmark, beta lagged one day
+    if cfg.beta_hedge and bench_daily is not None:
+        beta_roll = (net_ret.rolling(63).cov(bench_daily)
+                     / bench_daily.rolling(63).var())
+        beta_roll = beta_roll.clip(-3, 3).shift(1).fillna(0.0)
+        hedge = beta_roll * bench_daily.fillna(0.0)
+        net_ret = net_ret - hedge
+        gross_ret = gross_ret - hedge
 
     # Optional vol targeting (63d trailing, capped 3x leverage)
     if cfg.vol_target:
@@ -141,10 +193,7 @@ def run_backtest(
     # Quintile forward returns (annualized), full sample
     q_rets = _quantile_profile(prices, signal, rebal_dates, n_q=5)
 
-    bench = None
-    if benchmark_prices is not None and not benchmark_prices.empty:
-        bench = benchmark_prices.reindex(all_dates).pct_change(fill_method=None)
-        bench = bench.loc[net_ret.index]
+    bench = bench_daily.loc[net_ret.index] if bench_daily is not None else None
 
     # Trim to live period
     live = daily_w.abs().sum(axis=1) > 0

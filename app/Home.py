@@ -29,8 +29,14 @@ from quantdash.engine.attribution import (
     position_contribution,
     universe_performance,
 )
+from quantdash.data.insurance_events import (CAT_EVENTS, MARKET_PHASES,
+                                             PHASE_COLORS, event_study)
+from quantdash.engine.capacity import capacity_analysis, dollar_adv
 from quantdash.engine.factors import factor_exposure_heatmap_data
-from quantdash.engine.metrics import drawdown_series, monthly_return_table
+from quantdash.engine.metrics import (deflated_sharpe, drawdown_series,
+                                      ic_by_horizon, monthly_return_table,
+                                      regime_table)
+from quantdash.report import tearsheet_html
 from quantdash.ui import (
     ACCENT, CYAN, FACTOR_COLORS, GOLD, GRAY, GREEN, PURPLE, RED,
     SUBSECTOR_COLORS, diverging_colors, factor_color, inject_css, page_header,
@@ -236,7 +242,22 @@ with st.sidebar:
                          help="Last X% of the period is treated as out-of-sample; "
                               "metrics are reported separately so you can see if "
                               "the signal survives outside the fitting window.")
-    if st.button("Save these settings as my defaults", use_container_width=True):
+    with st.expander("Advanced construction"):
+        neutralize = st.selectbox(
+            "Neutralization", ["None", "Subsector"],
+            help="Subsector: demean the signal within each insurance subsector "
+                 "so the book expresses stock selection, not subsector bets.")
+        beta_hedge = st.checkbox(
+            "Beta-hedge vs benchmark",
+            help="Subtract trailing 63d beta × benchmark return (beta lagged "
+                 "1 day). Dollar-neutral is rarely beta-neutral.")
+        borrow_bps = st.number_input("Short borrow (annual bps)", 0.0, 500.0,
+                                     0.0, 25.0)
+        drift = st.checkbox(
+            "Drift weights between rebalances",
+            help="Let positions drift with returns instead of holding target "
+                 "weights constant — closer to how a real book behaves.")
+    if st.button("Save these settings as my defaults", width="stretch"):
         ws["defaults"].update(
             mode=mode, quantile=quantile, rebalance=int(rebal), cost_bps=cost_bps,
             max_weight=max_w, vol_target=vol_target, oos_frac=oos_frac,
@@ -244,7 +265,7 @@ with st.sidebar:
         save_workspace(ws)
         st.toast("Defaults saved")
 
-    run = st.button("▶ Run backtest", type="primary", use_container_width=True)
+    run = st.button("▶ Run backtest", type="primary", width="stretch")
 
 # ---------------- Run ----------------
 if run:
@@ -276,18 +297,37 @@ if run:
             mode=mode, quantile=quantile, rebalance_every=int(rebal),
             cost_bps=cost_bps, max_weight=max_w,
             vol_target=vol_target or None,
+            neutralize="subsector" if neutralize == "Subsector" else None,
+            beta_hedge=beta_hedge, short_borrow_annual_bps=borrow_bps,
+            drift_weights=drift,
         )
         try:
             result = run_backtest(prices, signal, cfg,
-                                  bench[bench_ticker] if not bench.empty else None)
+                                  bench[bench_ticker] if not bench.empty else None,
+                                  groups=SUBSECTOR)
         except ValueError as err:
             st.error(str(err))
             st.stop()
+
+        # record this trial for deflated-Sharpe accounting
+        import hashlib
+        _r = result.net_returns.dropna()
+        if len(_r) > 40 and _r.std() > 0:
+            trial_sr = float(_r.mean() / _r.std() * np.sqrt(252))
+            th = hashlib.md5(
+                (expression + str(cfg.to_dict())).encode()).hexdigest()[:10]
+            ws_t = load_workspace()
+            trials = ws_t.setdefault("trials", [])
+            if th not in {t.get("h") for t in trials}:
+                trials.append({"h": th, "sharpe": trial_sr})
+                ws_t["trials"] = trials[-500:]
+                save_workspace(ws_t)
 
         st.session_state.update(
             result=result, prices=prices, factors=factors,
             expression=expression, cfg=cfg, signal=signal, oos_frac=oos_frac,
             bench_ticker=bench_ticker if not bench.empty else None,
+            volume=volume, decay=ic_by_horizon(signal, prices),
         )
 
 if "result" not in st.session_state:
@@ -343,8 +383,17 @@ with tab_ov:
     sig = "✅ significant at 5% (Lo-corrected)" if m["sharpe_p_value"] < 0.05 else \
         "⚠️ NOT significant at 5% (Lo-corrected)"
     lo_ci = m["sharpe_ci_95"]
+    trial_sharpes = [t.get("sharpe") for t in load_workspace().get("trials", [])]
+    dsr = deflated_sharpe(result.net_returns, trial_sharpes)
+    dsr_txt = ""
+    if np.isfinite(dsr.get("dsr", np.nan)):
+        dsr_ok = "✅" if dsr["dsr"] > 0.95 else "⚠️"
+        dsr_txt = (f" · deflated Sharpe: **{dsr['dsr']:.1%}** confidence after "
+                   f"{dsr['n_trials']} recorded trials "
+                   f"(hurdle SR₀={dsr['sr0_ann']:.2f}) {dsr_ok}")
     st.caption(f"{sig} · bootstrap 95% CI on Sharpe: [{lo_ci[0]:.2f}, {lo_ci[1]:.2f}]"
-               + (" — excludes zero ✅" if lo_ci[0] > 0 else " — includes zero ⚠️"))
+               + (" — excludes zero ✅" if lo_ci[0] > 0 else " — includes zero ⚠️")
+               + dsr_txt)
 
     if split_date is not None:
         m_is = compute_metrics(result.net_returns.loc[:split_date],
@@ -362,7 +411,7 @@ with tab_ov:
                  "Out-of-sample": [fmt.format(m_oos[k]) for k, _, fmt in keys]},
                 index=[label for _, label, _ in keys])
             sc1, sc2 = st.columns([1, 2])
-            sc1.dataframe(split_df, use_container_width=True)
+            sc1.dataframe(split_df, width="stretch")
             ratio = (m_oos["sharpe"] / m_is["sharpe"]
                      if m_is["sharpe"] not in (0, None) else float("nan"))
             verdict_txt = ("holds up out of sample" if ratio > 0.5
@@ -374,7 +423,11 @@ with tab_ov:
                 "The signal expression never saw these dates when you were "
                 "iterating on it — treat the OOS column as the honest number.")
 
-    log_scale = st.toggle("Log scale", value=False)
+    tg1, tg2 = st.columns([1, 3])
+    log_scale = tg1.toggle("Log scale", value=False)
+    cycle_overlay = tg2.toggle("Insurance cycle overlay", value=False,
+                               help="Shade hard/soft market phases and mark "
+                                    "major cat events on the equity curve.")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.74, 0.26], vertical_spacing=0.03)
     gross_eq = (1 + result.gross_returns.fillna(0)).cumprod()
@@ -407,6 +460,27 @@ with tab_ov:
                       annotation_position="top left",
                       annotation_font=dict(size=11, color="#8B93A7"),
                       row=1, col=1)
+    if cycle_overlay:
+        t0, t1 = result.equity.index[0], result.equity.index[-1]
+        for p_s, p_e, label, kind in MARKET_PHASES:
+            ps, pe = pd.Timestamp(p_s), pd.Timestamp(p_e)
+            if pe < t0 or ps > t1:
+                continue
+            fig.add_vrect(x0=max(ps, t0), x1=min(pe, t1),
+                          fillcolor=PHASE_COLORS[kind], line_width=0,
+                          annotation_text=label, annotation_position="bottom left",
+                          annotation_font=dict(size=10, color="#8B93A7"),
+                          row=1, col=1)
+        for ev_date, ev_label in CAT_EVENTS:
+            ev = pd.Timestamp(ev_date)
+            if t0 <= ev <= t1:
+                fig.add_vline(x=ev, line_width=1, line_dash="dot",
+                              line_color="rgba(240,84,79,0.45)", row=1, col=1)
+                fig.add_annotation(x=ev, y=1.0, yref="y domain",
+                                   text=ev_label, showarrow=False,
+                                   textangle=-90, xshift=-7,
+                                   font=dict(size=9, color="rgba(240,84,79,0.8)"),
+                                   row=1, col=1)
     style_fig(fig, height=560, title=f"Growth of $1 — net vs gross vs {bench_label}")
     fig.update_yaxes(type="log" if log_scale else "linear", row=1, col=1)
     fig.update_yaxes(tickformat=".0%", row=2, col=1)
@@ -419,7 +493,7 @@ with tab_ov:
             bgcolor="#151B2B", activecolor="#5B8DEF", font=dict(size=11),
         ),
         row=1, col=1)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 # ---------------- Winners & Losers (period attribution) ----------------
 with tab_win:
@@ -479,7 +553,7 @@ with tab_win:
             fig_c.update_xaxes(range=[dfc["contribution"].min() * 1.35 if
                                       dfc["contribution"].min() < 0 else 0,
                                       max(dfc["contribution"].max(), 0) * 1.35])
-            col.plotly_chart(fig_c, use_container_width=True)
+            col.plotly_chart(fig_c, width="stretch")
         st.caption("Contribution = Σ(weight × daily return) while held. Hover for the "
                    "stock's own return, average weight, and days held.")
 
@@ -490,9 +564,9 @@ with tab_win:
     uni_df["traded by strategy"] = ["✅" if t in held_now else "" for t in uni_df.index]
     u1, u2 = st.columns(2)
     u1.dataframe(uni_df.head(15).style.format({"return": "{:.1%}"}),
-                 use_container_width=True)
+                 width="stretch")
     u2.dataframe(uni_df.tail(15).iloc[::-1].style.format({"return": "{:.1%}"}),
-                 use_container_width=True)
+                 width="stretch")
     missed = uni_df.head(15)["traded by strategy"].eq("").sum()
     st.caption(f"{missed} of the period's top 15 performers were never held — "
                "if that number is high, the signal is missing the winners, "
@@ -520,7 +594,7 @@ with tab_win:
                       title=f"Period return {period_ret:.1%} decomposed "
                             "(period betas × factor returns)")
             fig_fc.update_layout(yaxis_tickformat=".0%", waterfallgap=0.35)
-            st.plotly_chart(fig_fc, use_container_width=True)
+            st.plotly_chart(fig_fc, width="stretch")
             st.caption("Big 'Residual (alpha)' bar = the strategy did something factors "
                        "don't explain in this period. Big factor bars = it was riding "
                        "(or fighting) that factor.")
@@ -532,7 +606,7 @@ with tab_win:
             bw.style.format({"return": "{:.1%}"})
             .map(lambda v: "color: seagreen" if v == "best"
                  else ("color: crimson" if v == "worst" else ""), subset=["type"]),
-            use_container_width=True, hide_index=True)
+            width="stretch", hide_index=True)
 
     st.subheader("Stock drilldown")
     dd_options = (list(contrib.index) if not contrib.empty
@@ -576,7 +650,7 @@ with tab_win:
         fig_dd2.update_yaxes(range=[0, 1], row=2, col=1, secondary_y=False)
         fig_dd2.update_yaxes(tickformat=".1%", showgrid=False, row=2, col=1,
                              secondary_y=True)
-        st.plotly_chart(fig_dd2, use_container_width=True)
+        st.plotly_chart(fig_dd2, width="stretch")
         st.caption("Top: price, colored green/red while the strategy held it. "
                    "Bottom: the stock's cross-sectional signal rank (cyan, 0–1) "
                    "and its portfolio weight (blue area). If the green stretches sit "
@@ -609,7 +683,7 @@ with tab_sec:
         style_fig(fig_mix, height=360, ytickformat=".0%",
                   title="Gross exposure mix by subsector (weekly avg)")
         fig_mix.update_yaxes(range=[0, 1])
-        st.plotly_chart(fig_mix, use_container_width=True)
+        st.plotly_chart(fig_mix, width="stretch")
 
         sc1, sc2 = st.columns(2)
         # Current net weight by subsector
@@ -623,7 +697,7 @@ with tab_sec:
         style_fig(fig_net, height=320, hover="closest", show_legend=False,
                   title="Current net weight by subsector")
         fig_net.update_layout(xaxis_tickformat=".0%", bargap=0.35)
-        sc1.plotly_chart(fig_net, use_container_width=True)
+        sc1.plotly_chart(fig_net, width="stretch")
 
         # P&L contribution by subsector (full backtest)
         contrib_full = position_contribution(result.weights, prices)
@@ -640,7 +714,7 @@ with tab_sec:
             style_fig(fig_cs, height=320, hover="closest", show_legend=False,
                       title="P&L contribution by subsector (full backtest)")
             fig_cs.update_layout(xaxis_tickformat=".1%", bargap=0.35)
-            sc2.plotly_chart(fig_cs, use_container_width=True)
+            sc2.plotly_chart(fig_cs, width="stretch")
 
         # Subsector performance: equal-weight cumulative return per subsector
         st.subheader("Subsector tape (equal-weight, growth of $1)")
@@ -656,10 +730,37 @@ with tab_sec:
                 line=dict(width=1.8, color=SUBSECTOR_COLORS.get(subname, GRAY)),
                 hovertemplate="%{y:.2f}<extra>" + subname + "</extra>"))
         style_fig(fig_tape, height=400)
-        st.plotly_chart(fig_tape, use_container_width=True)
+        st.plotly_chart(fig_tape, width="stretch")
         st.caption("Where the cycle is: brokers compounding through everything, "
                    "P&C riding the hard market, life tracking rates — check the "
                    "strategy's subsector mix against which tapes are working.")
+
+        st.subheader("Cat event study")
+        es = event_study(prices[mapped], sub_of, pre_days=10, post_days=30)
+        if es.empty:
+            st.caption("No cat events fall inside this data window.")
+        else:
+            fig_es = go.Figure()
+            for subname in es.columns:
+                fig_es.add_trace(go.Scatter(
+                    x=es.index, y=es[subname], name=subname,
+                    line=dict(width=1.8,
+                              color=SUBSECTOR_COLORS.get(subname, GRAY)),
+                    hovertemplate="day %{x}: %{y:.1%}<extra>" + subname
+                                  + "</extra>"))
+            fig_es.add_vline(x=0, line_dash="dot",
+                             line_color="rgba(255,255,255,0.3)")
+            n_ev = sum(1 for d, _ in CAT_EVENTS
+                       if prices.index[0] <= pd.Timestamp(d) <= prices.index[-1])
+            style_fig(fig_es, height=380, ytickformat=".1%",
+                      title=f"Average subsector return around {n_ev} major cat "
+                            "events (day 0 = event)")
+            fig_es.update_xaxes(title="Trading days from event")
+            st.plotly_chart(fig_es, width="stretch")
+            st.caption("The classic pattern: P&C/reinsurance dip on the event "
+                       "then recover as pricing power firms; brokers barely "
+                       "notice. If your strategy's P&L concentrates in these "
+                       "windows, it's monetizing cat recoveries — know that.")
 
 # ---------------- Factor overlays ----------------
 with tab_fac:
@@ -695,7 +796,7 @@ with tab_fac:
                 .map(lambda v: "background-color: rgba(255,165,0,.25)"
                      if isinstance(v, float) and abs(v) > 2 else "",
                      subset=["t-stat"]),
-                use_container_width=True,
+                width="stretch",
             )
 
             # --- Overlay: actual equity vs what the factors alone would produce ---
@@ -726,7 +827,7 @@ with tab_fac:
                 style_fig(fig_ov, height=420,
                           title="Factor overlay — can a static factor portfolio "
                                 "replicate this strategy?")
-                st.plotly_chart(fig_ov, use_container_width=True)
+                st.plotly_chart(fig_ov, width="stretch")
                 st.caption("Blue = your strategy. Gold = a static portfolio of the "
                            "factors with the same betas. Green = what's left after "
                            "subtracting it. A flat/falling green line means the "
@@ -744,7 +845,7 @@ with tab_fac:
                         line=dict(width=2, color=factor_color(col, i)),
                         hovertemplate="%{y:.2f}<extra>" + col + "</extra>"))
                 style_fig(fig_b, height=360, title="Rolling 6-month factor betas")
-                st.plotly_chart(fig_b, use_container_width=True)
+                st.plotly_chart(fig_b, width="stretch")
 
                 alpha_roll = roll["alpha_ann"]
                 fig_a = go.Figure(go.Scatter(
@@ -754,7 +855,7 @@ with tab_fac:
                     hovertemplate="%{y:.1%}<extra>rolling α</extra>"))
                 style_fig(fig_a, height=260, ytickformat=".0%",
                           title="Rolling annualized factor α", show_legend=False)
-                st.plotly_chart(fig_a, use_container_width=True)
+                st.plotly_chart(fig_a, width="stretch")
 
             hm = factor_exposure_heatmap_data(result.weights, prices, fac)
             if not hm.empty:
@@ -772,7 +873,7 @@ with tab_fac:
                           show_legend=False,
                           title="Current holdings — weight × factor beta "
                                 "(exposure contribution)")
-                st.plotly_chart(fig_h, use_container_width=True)
+                st.plotly_chart(fig_h, width="stretch")
 
 # ---------------- Signal diagnostics ----------------
 with tab_sig:
@@ -793,9 +894,60 @@ with tab_sig:
                   title="Rank IC per rebalance (signal vs forward return)")
         fig_ic.update_layout(yaxis2=dict(overlaying="y", side="right",
                                          showgrid=False, zeroline=False))
-        st.plotly_chart(fig_ic, use_container_width=True)
+        st.plotly_chart(fig_ic, width="stretch")
         st.caption("A monotonically rising cumulative IC = stable predictive power. "
                    "Flat or regime-y = signal works only sometimes.")
+
+    decay = st.session_state.get("decay")
+    if decay is not None and not decay.empty:
+        dc1, dc2 = st.columns(2)
+        fig_dk = go.Figure(go.Bar(
+            x=[f"{h}d" for h in decay.index], y=decay["ic_mean"],
+            marker=dict(color=diverging_colors(decay["ic_mean"].fillna(0)),
+                        line=dict(width=0)),
+            text=[f"t={t:.1f}" if np.isfinite(t) else ""
+                  for t in decay["ic_tstat"]],
+            textposition="outside", cliponaxis=False))
+        style_fig(fig_dk, height=300, hover="closest", show_legend=False,
+                  title="Signal decay — mean rank IC by forward horizon")
+        fig_dk.update_layout(bargap=0.4)
+        dc1.plotly_chart(fig_dk, width="stretch")
+        best_h = decay["ic_mean"].abs().idxmax()
+        dc2.markdown(
+            f"**Strongest horizon: {best_h} days** "
+            f"(IC {decay.loc[best_h, 'ic_mean']:.4f}, "
+            f"t = {decay.loc[best_h, 'ic_tstat']:.1f}).\n\n"
+            "The decay profile sets the natural rebalance frequency: if the IC "
+            "peaks at 21d and you rebalance every 1d, you're paying turnover "
+            "for information that hasn't matured; if it peaks at 1d and you "
+            "rebalance every 21d, the edge is gone before you trade it.")
+
+    macro_all = _load_macro()
+    if not macro_all.empty:
+        st.subheader("Regime lens (macro-conditioned performance)")
+        rsel = st.selectbox("Condition on", list(macro_all.columns),
+                            key="regime_series")
+        rt = regime_table(result.net_returns, macro_all[rsel])
+        if rt.empty:
+            st.caption("Not enough overlapping history to bucket this series.")
+        else:
+            rc1, rc2 = st.columns([3, 2])
+            rc1.dataframe(
+                rt.style.format({"ann_return": "{:.1%}", "sharpe": "{:.2f}",
+                                 "hit_rate": "{:.1%}"}, na_rep="—"),
+                width="stretch", hide_index=True)
+            fig_rg = go.Figure(go.Bar(
+                x=rt["condition"], y=rt["sharpe"],
+                marker=dict(color=diverging_colors(rt["sharpe"].fillna(0)),
+                            line=dict(width=0)),
+                text=[f"{v:.2f}" for v in rt["sharpe"]],
+                textposition="outside", cliponaxis=False))
+            style_fig(fig_rg, height=280, hover="closest", show_legend=False,
+                      title=f"Sharpe by {rsel} regime (macro lagged 1 day)")
+            fig_rg.update_layout(bargap=0.4)
+            rc2.plotly_chart(fig_rg, width="stretch")
+            st.caption("A strategy that only works in one macro state isn't "
+                       "diversifying — it's a levered bet on that state.")
 
     if not result.quantile_returns.empty:
         qr = result.quantile_returns
@@ -809,7 +961,7 @@ with tab_sig:
                   title="Annualized forward return by signal quintile "
                         "(Q5 = highest signal)")
         fig_q.update_layout(bargap=0.4)
-        st.plotly_chart(fig_q, use_container_width=True)
+        st.plotly_chart(fig_q, width="stretch")
         st.caption("You want monotonic bars. If Q5 ≈ Q1 the signal has no spread; "
                    "if only the tails work, trade narrower quantiles.")
 
@@ -822,7 +974,7 @@ with tab_sig:
             hovertemplate="%{y:.1%}<extra>turnover</extra>"))
         style_fig(fig_t, height=240, ytickformat=".0%", show_legend=False,
                   title="One-way turnover per rebalance (10-rebalance MA)")
-        st.plotly_chart(fig_t, use_container_width=True)
+        st.plotly_chart(fig_t, width="stretch")
 
 # ---------------- All the numbers ----------------
 with tab_num:
@@ -831,7 +983,7 @@ with tab_num:
     st.dataframe(
         mt.style.format("{:.1%}", na_rep="")
         .background_gradient(cmap="RdYlGn", vmin=-0.08, vmax=0.08, axis=None),
-        use_container_width=True,
+        width="stretch",
     )
     st.subheader("Full metric dump")
     flat = {k: (f"{v:.4f}" if isinstance(v, float) else str(v))
@@ -839,13 +991,48 @@ with tab_num:
     ci = metrics.get("sharpe_ci_95")
     if ci:
         flat["sharpe_ci_95"] = f"[{ci[0]:.2f}, {ci[1]:.2f}]"
-    st.dataframe(pd.Series(flat, name="value").to_frame(), use_container_width=True)
+    st.dataframe(pd.Series(flat, name="value").to_frame(), width="stretch")
 
     st.subheader("Latest positions")
     lw = result.weights.iloc[-1]
     lw = lw[lw.abs() > 1e-6].sort_values(ascending=False)
     st.dataframe(lw.rename("weight").to_frame().style.format("{:.2%}"),
-                 use_container_width=True, height=300)
+                 width="stretch", height=300)
+
+    st.subheader("Capacity — at what AUM does this stop working?")
+    vol_panel = st.session_state.get("volume")
+    if vol_panel is None or vol_panel.empty:
+        st.caption("No volume data available for capacity analysis.")
+    else:
+        adv = dollar_adv(prices, vol_panel,
+                         volume_is_dollars=(src.name == "snowflake_axioma_read_only"))
+        cap = capacity_analysis(result.net_returns, result.weights, prices, adv)
+        cap_disp = cap.reset_index()
+        cap_disp["aum"] = cap_disp["aum"].map(lambda v: f"${v/1e6:,.0f}M")
+        cp1, cp2 = st.columns([2, 3])
+        cp1.dataframe(
+            cap_disp.style.format({
+                "ann_impact_drag": "{:.2%}", "sharpe_after_impact": "{:.2f}",
+                "sharpe_net": "{:.2f}", "median_participation": "{:.1%}",
+                "p95_participation": "{:.1%}"}, na_rep="—"),
+            width="stretch", hide_index=True)
+        fig_cap = go.Figure()
+        fig_cap.add_trace(go.Scatter(
+            x=cap.index / 1e6, y=cap["sharpe_after_impact"],
+            mode="lines+markers", name="Sharpe after impact",
+            line=dict(width=2.2, color=ACCENT)))
+        fig_cap.add_hline(y=float(cap["sharpe_net"].iloc[0]), line_dash="dot",
+                          line_color=GRAY,
+                          annotation_text="size-free Sharpe",
+                          annotation_font=dict(size=10, color="#8B93A7"))
+        style_fig(fig_cap, height=300, hover="closest", show_legend=False,
+                  title="Impact-adjusted Sharpe vs AUM (sqrt impact model)")
+        fig_cap.update_xaxes(title="AUM ($M)", type="log")
+        cp2.plotly_chart(fig_cap, width="stretch")
+        st.caption("Square-root impact: cost per name = trade%NAV × daily vol × "
+                   "√participation. The base bps cost is already in the net "
+                   "returns; this adds the size-dependent piece. Participation "
+                   "capped at 100% of ADV.")
 
     st.subheader("Export")
     import json as _json
@@ -867,6 +1054,35 @@ with tab_num:
                        result.ic.rename("rank_ic").to_csv().encode(),
                        "rank_ic.csv", "text/csv", key="dl_ic")
 
+    _ts_metrics = {
+        "Sharpe": f"{metrics['sharpe']:.2f}",
+        "Lo-corrected Sharpe": f"{metrics['sharpe_lo_corrected']:.2f} "
+                               f"(p={metrics['sharpe_p_value']:.3f})",
+        "Annual return": f"{metrics['ann_return']:.1%}",
+        "Annual vol": f"{metrics['ann_vol']:.1%}",
+        "Max drawdown": f"{metrics['max_drawdown']:.1%}",
+        "Hit rate": f"{metrics['hit_rate']:.1%}",
+        f"Beta ({bench_label})": f"{metrics.get('beta', float('nan')):.2f}"
+        if "beta" in metrics else "—",
+        "Annual turnover": f"{metrics.get('ann_turnover', 0):.0%}",
+        "Cost drag": f"{metrics.get('ann_cost_drag', 0):.2%}",
+        "Period": f"{metrics['start']} → {metrics['end']}",
+    }
+    _mt_html = monthly_return_table(result.net_returns).map(
+        lambda v: f"{v:.1%}" if pd.notna(v) else "")
+    st.download_button(
+        "⬇ HTML tearsheet (shareable)",
+        tearsheet_html(
+            title="Insurance Alpha Lab — Strategy Tearsheet",
+            subtitle=f"{cfg.mode} · rebalance {cfg.rebalance_every}d · "
+                     f"cost {cfg.cost_bps:.0f}bps · {metrics['start']} → "
+                     f"{metrics['end']}",
+            expression=st.session_state["expression"],
+            metrics=_ts_metrics, figures=[fig],
+            tables={"Monthly returns": _mt_html},
+        ).encode(),
+        "tearsheet.html", "text/html", key="dl_tearsheet")
+
 # ---------------- Compare ----------------
 with tab_cmp:
     st.markdown("Snapshot runs here, then re-run with a different signal or "
@@ -874,14 +1090,28 @@ with tab_cmp:
     cc1, cc2 = st.columns([3, 1])
     snap_name = cc1.text_input("Label for current run",
                                value=st.session_state["expression"][:48])
-    if cc2.button("➕ Snapshot current run", use_container_width=True):
-        st.session_state.setdefault("compare", {})[snap_name] = {
+    # persisted snapshots survive restarts (local store)
+    if "compare" not in st.session_state:
+        try:
+            st.session_state["compare"] = _theories().list_snapshots()
+        except Exception:
+            st.session_state["compare"] = {}
+
+    if cc2.button("➕ Snapshot current run", width="stretch"):
+        snap = {
             "returns": result.net_returns,
             "metrics": {k: v for k, v in metrics.items()
                         if not isinstance(v, (tuple, str))},
             "expression": st.session_state["expression"],
             "config": cfg.to_dict(),
         }
+        st.session_state.setdefault("compare", {})[snap_name] = snap
+        try:
+            _theories().save_snapshot(snap_name, snap["expression"],
+                                      snap["config"], snap["metrics"],
+                                      snap["returns"])
+        except Exception:
+            pass
         st.rerun()
 
     runs = st.session_state.get("compare", {})
@@ -902,7 +1132,7 @@ with tab_cmp:
                                          line=dict(width=1.2, color="#6B7280",
                                                    dash="dot")))
         style_fig(fig_cmp, height=440, title="Snapshotted runs — growth of $1")
-        st.plotly_chart(fig_cmp, use_container_width=True)
+        st.plotly_chart(fig_cmp, width="stretch")
 
         cmp_keys = [("sharpe", "{:.2f}"), ("sharpe_lo_corrected", "{:.2f}"),
                     ("sharpe_p_value", "{:.3f}"), ("ann_return", "{:.1%}"),
@@ -915,7 +1145,7 @@ with tab_cmp:
                        if r["metrics"].get(k) is not None else "—")
                    for k, fmt in cmp_keys}
             for name, r in runs.items()})
-        st.dataframe(cmp_df, use_container_width=True)
+        st.dataframe(cmp_df, width="stretch")
 
         with st.expander("Expressions & configs"):
             for name, r in runs.items():
@@ -925,10 +1155,19 @@ with tab_cmp:
         drop = rm1.selectbox("Remove a snapshot", ["—"] + list(runs))
         if drop != "—":
             del st.session_state["compare"][drop]
+            try:
+                _theories().delete_snapshot(drop)
+            except Exception:
+                pass
             st.rerun()
         if rm2.button("Clear all snapshots"):
             st.session_state["compare"] = {}
+            try:
+                _theories().clear_snapshots()
+            except Exception:
+                pass
             st.rerun()
+        st.caption("Snapshots persist across sessions (stored locally).")
 
 # ---------------- Save as theory ----------------
 st.divider()

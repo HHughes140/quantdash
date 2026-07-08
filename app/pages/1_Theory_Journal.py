@@ -60,7 +60,7 @@ st.dataframe(
         "sharpe": "{:.2f}", "lo_sharpe": "{:.2f}", "p": "{:.3f}",
         "ann_ret": "{:.1%}", "max_dd": "{:.1%}", "capm_α": "{:.1%}",
         "ic_t": "{:.2f}", "turnover": "{:.0%}"}, na_rep="—"),
-    use_container_width=True, height=min(600, 60 + 36 * len(df)),
+    width="stretch", height=min(600, 60 + 36 * len(df)),
 )
 
 # Sharpe comparison chart
@@ -75,7 +75,7 @@ fig = go.Figure(go.Bar(
 style_fig(fig, height=340, hover="closest", show_legend=False,
           title="Sharpe by theory (green = p < 0.05, Lo-corrected)")
 fig.update_layout(bargap=0.4)
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # Detail / manage
 st.divider()

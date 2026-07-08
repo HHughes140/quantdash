@@ -156,7 +156,7 @@ for _, wrow in windows.iterrows():
 style_fig(fig, height=460,
           title=f"Stitched OOS equity — train {state['train']}, "
                 f"test {state['test']} (gray = static candidates)")
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # Chosen parameter over time + per-window Sharpes
 w1, w2 = st.columns(2)
@@ -168,7 +168,7 @@ fig_p = go.Figure(go.Scatter(
 style_fig(fig_p, height=300, hover="closest", show_legend=False,
           title="Chosen parameter per window")
 fig_p.update_yaxes(type="category", title="A")
-w1.plotly_chart(fig_p, use_container_width=True)
+w1.plotly_chart(fig_p, width="stretch")
 st.caption("A stable chosen parameter = robust signal. Thrashing between "
            "extremes = the training window is fitting noise.")
 
@@ -184,7 +184,7 @@ fig_w.add_trace(go.Scatter(x=windows["window_start"],
                                        color="#E6E9F0")))
 style_fig(fig_w, height=300, hover="closest",
           title="Per-window OOS Sharpe vs best hindsight")
-w2.plotly_chart(fig_w, use_container_width=True)
+w2.plotly_chart(fig_w, width="stretch")
 
 st.dataframe(
     windows.assign(
@@ -193,7 +193,7 @@ st.dataframe(
     .style.format({"train_sharpe": "{:.2f}", "oos_sharpe": "{:.2f}",
                    "oos_return": "{:.1%}", "best_hindsight_sharpe": "{:.2f}"},
                   na_rep="—"),
-    use_container_width=True, hide_index=True)
+    width="stretch", hide_index=True)
 
 if st.button("➕ Add stitched WF to Compare (Backtest Lab tab)"):
     snap = {k: v for k, v in m.items() if not isinstance(v, (tuple, str))}

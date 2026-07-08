@@ -79,7 +79,7 @@ else:
     c1.metric("Tickers", len(cov))
     c2.metric("Date range", f"{cov['start'].min()} → {cov['end'].max()}")
     c3.metric("Rows", f"{int(cov['rows'].sum()):,}")
-    st.dataframe(cov, use_container_width=True, height=300)
+    st.dataframe(cov, width="stretch", height=300)
 
 facs = src.available_factors()
 st.subheader("Factors")
@@ -148,7 +148,7 @@ with st.expander("Upload macro workbook (Excel or CSV)", expanded=not macro_name
         if mdf.empty:
             st.error("Empty file/sheet.")
         else:
-            st.dataframe(mdf.head(5), use_container_width=True)
+            st.dataframe(mdf.head(5), width="stretch")
             cols = list(mdf.columns)
             date_guess = next(
                 (c for c in cols if str(c).lower() in
