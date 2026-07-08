@@ -85,6 +85,35 @@ facs = src.available_factors()
 st.subheader("Factors")
 st.write(", ".join(f"`{f}`" for f in facs) if facs else "None loaded.")
 
+with st.expander("Upload custom factor returns"):
+    st.caption(
+        "Wide CSV: first column = date, one column per factor, daily returns. "
+        "Stored in the local DuckDB and **merged into Factor Overlays "
+        "automatically** alongside the source factors — this is the drop-in "
+        "for custom factor loader exports."
+    )
+    fup = st.file_uploader("Factor CSV", type=["csv"], key="factor_up")
+    fpct = st.checkbox("Values are in percent", key="factor_pct")
+    if fup is not None and st.button("Load factors", key="factor_load"):
+        fdf = pd.read_csv(fup)
+        datec = fdf.columns[0]
+        fdf[datec] = pd.to_datetime(fdf[datec], errors="coerce")
+        fdf = fdf.dropna(subset=[datec])
+        long = fdf.melt(id_vars=datec, var_name="factor", value_name="value")
+        long["value"] = pd.to_numeric(long["value"], errors="coerce")
+        if fpct:
+            long["value"] = long["value"] / 100.0
+        long = long.dropna(subset=["value"])
+        long["date"] = long[datec].dt.date
+        if long.empty:
+            st.error("No parsable rows — check the format.")
+        else:
+            n = DuckDBSource().write_factors(long[["date", "factor", "value"]])
+            st.success(f"Loaded {n:,} rows across "
+                       f"{long['factor'].nunique()} factors: "
+                       + ", ".join(f"`{f}`" for f in sorted(long["factor"].unique())))
+            st.cache_data.clear()
+
 st.divider()
 
 # ---------------- Seeding ----------------

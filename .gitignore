@@ -3,3 +3,4 @@ data/*.duckdb
 __pycache__/
 .streamlit/secrets.toml
 *.pyc
+data/workspace.json

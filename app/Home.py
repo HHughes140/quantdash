@@ -11,8 +11,9 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from quantdash.data import get_source, get_theory_store
+from quantdash.data import DuckDBSource, get_source, get_theory_store
 from quantdash.data.universe import BENCHMARKS, INSURANCE_UNIVERSE, SUBSECTOR
+from quantdash.workspace import load_workspace, save_workspace
 from quantdash.engine import (
     SIGNAL_PRESETS,
     BacktestConfig,
@@ -52,7 +53,19 @@ def _load_panel(tickers: tuple, start: str, end: str, field: str) -> pd.DataFram
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_factors(start: str, end: str) -> pd.DataFrame:
-    return _source().get_factors(start=start, end=end)
+    """Source factors, merged with any custom factors in the local store
+    (uploaded via Data Explorer / a custom factor loader)."""
+    src_ = _source()
+    f = src_.get_factors(start=start, end=end)
+    if src_.name != "duckdb":
+        try:
+            local = DuckDBSource().get_factors(start=start, end=end)
+            extra = [c for c in local.columns if c not in f.columns]
+            if extra:
+                f = local[extra] if f.empty else f.join(local[extra], how="left")
+        except Exception:
+            pass
+    return f
 
 
 @st.cache_resource
@@ -82,9 +95,10 @@ if not tickers_all:
 with st.sidebar:
     st.header("Experiment")
 
+    ws = load_workspace()
     insurance_avail = [t for t in tickers_all if t in SUBSECTOR]
     universe_opts = (["Insurance", "Insurance subsectors"] if insurance_avail else []) \
-        + ["All available", "Custom"]
+        + ["All available", "Custom"] + (["Saved"] if ws["universes"] else [])
     universe_mode = st.radio("Universe", universe_opts, horizontal=True)
     if universe_mode == "Insurance":
         tickers = insurance_avail
@@ -97,17 +111,38 @@ with st.sidebar:
     elif universe_mode == "Custom":
         tickers = st.multiselect("Tickers", tickers_all,
                                  default=tickers_all[: min(50, len(tickers_all))])
+        uc1, uc2 = st.columns([2, 1])
+        uni_name = uc1.text_input("Save as universe", key="uni_name",
+                                  placeholder="e.g. hard-market P&C")
+        if uc2.button("Save", key="save_uni") and uni_name.strip() and tickers:
+            ws["universes"][uni_name.strip()] = sorted(tickers)
+            save_workspace(ws)
+            st.rerun()
+    elif universe_mode == "Saved":
+        pick = st.selectbox("Saved universe", sorted(ws["universes"]))
+        tickers = [t for t in ws["universes"].get(pick, []) if t in tickers_all]
+        st.caption(f"{len(tickers)} tickers")
+        if st.button("🗑 Delete this universe", key="del_uni"):
+            del ws["universes"][pick]
+            save_workspace(ws)
+            st.rerun()
     else:
         tickers = [t for t in tickers_all if t not in BENCHMARKS]
 
     bench_avail = [b for b in BENCHMARKS if b in tickers_all]
-    if bench_avail:
-        default_bench = ("KIE" if "KIE" in bench_avail
-                         and universe_mode.startswith("Insurance") else bench_avail[0])
-        bench_ticker = st.selectbox("Benchmark", bench_avail,
-                                    index=bench_avail.index(default_bench))
+    bench_opts = bench_avail + ["Other…"]
+    default_bench = ws["defaults"].get("benchmark") or (
+        "KIE" if "KIE" in bench_avail and universe_mode.startswith("Insurance")
+        else (bench_avail[0] if bench_avail else "Other…"))
+    bench_choice = st.selectbox(
+        "Benchmark", bench_opts,
+        index=bench_opts.index(default_bench) if default_bench in bench_opts else 0)
+    if bench_choice == "Other…":
+        bench_ticker = st.text_input(
+            "Benchmark ticker", key="bench_custom",
+            help="Any ticker in the data source").strip().upper() or None
     else:
-        bench_ticker = None
+        bench_ticker = bench_choice
 
     cov = src.coverage()
     dmin, dmax = pd.to_datetime(cov["start"].min()), pd.to_datetime(cov["end"].max())
@@ -118,11 +153,33 @@ with st.sidebar:
     )
 
     st.subheader("Signal")
-    preset = st.selectbox("Preset", ["— custom —"] + list(SIGNAL_PRESETS))
-    default_expr = SIGNAL_PRESETS.get(preset, st.session_state.get(
-        "expression", "rank(momentum(252, 21))"))
+    saved_presets = ws["signal_presets"]
+    preset_names = (["— custom —"] + list(SIGNAL_PRESETS)
+                    + [f"★ {n}" for n in sorted(saved_presets)])
+    preset = st.selectbox("Preset", preset_names)
+    if preset.startswith("★ "):
+        default_expr = saved_presets.get(preset[2:], "")
+    else:
+        default_expr = SIGNAL_PRESETS.get(preset, st.session_state.get(
+            "expression", "rank(momentum(252, 21))"))
     expression = st.text_area("Expression (higher = more attractive)",
                               value=default_expr, height=80)
+    with st.expander("Manage presets"):
+        pn1, pn2 = st.columns([2, 1])
+        pname = pn1.text_input("Save expression as", key="preset_name",
+                               placeholder="preset name")
+        if pn2.button("Save", key="save_preset") and pname.strip():
+            ws["signal_presets"][pname.strip()] = expression
+            save_workspace(ws)
+            st.rerun()
+        if saved_presets:
+            dp1, dp2 = st.columns([2, 1])
+            dp = dp1.selectbox("Delete preset", ["—"] + sorted(saved_presets),
+                               key="del_preset")
+            if dp2.button("Delete", key="del_preset_btn") and dp != "—":
+                del ws["signal_presets"][dp]
+                save_workspace(ws)
+                st.rerun()
     with st.expander("DSL reference"):
         st.markdown(
             "**Time-series:** `returns(n)`, `momentum(lb, skip)`, `vol(n)`, "
@@ -135,22 +192,40 @@ with st.sidebar:
         )
 
     st.subheader("Portfolio")
-    mode = st.selectbox("Construction", ["long_short", "long_only", "signal_weight"],
+    d = ws["defaults"]
+    _modes = ["long_short", "long_only", "signal_weight"]
+    _rebals = [1, 5, 10, 21, 63]
+    mode = st.selectbox("Construction", _modes,
+                        index=_modes.index(d.get("mode", "long_short"))
+                        if d.get("mode") in _modes else 0,
                         format_func=lambda x: {
                             "long_short": "Long/short quantiles (dollar-neutral)",
                             "long_only": "Long-only top quantile",
                             "signal_weight": "Signal-proportional weights"}[x])
     c1, c2 = st.columns(2)
-    quantile = c1.slider("Quantile", 0.05, 0.5, 0.2, 0.05)
-    rebal = c2.selectbox("Rebalance (days)", [1, 5, 10, 21, 63], index=1)
+    quantile = c1.slider("Quantile", 0.05, 0.5, float(d.get("quantile", 0.2)), 0.05)
+    rebal = c2.selectbox("Rebalance (days)", _rebals,
+                         index=_rebals.index(int(d.get("rebalance", 5)))
+                         if int(d.get("rebalance", 5)) in _rebals else 1)
     c3, c4 = st.columns(2)
-    cost_bps = c3.number_input("Cost (bps, one-way)", 0.0, 100.0, 5.0, 1.0)
-    max_w = c4.number_input("Max weight", 0.01, 1.0, 0.10, 0.01)
-    vol_target = st.number_input("Vol target (0 = off)", 0.0, 0.5, 0.0, 0.01)
-    oos_frac = st.slider("Hold-out (OOS) fraction", 0.0, 0.5, 0.3, 0.05,
+    cost_bps = c3.number_input("Cost (bps, one-way)", 0.0, 100.0,
+                               float(d.get("cost_bps", 5.0)), 1.0)
+    max_w = c4.number_input("Max weight", 0.01, 1.0,
+                            float(d.get("max_weight", 0.10)), 0.01)
+    vol_target = st.number_input("Vol target (0 = off)", 0.0, 0.5,
+                                 float(d.get("vol_target", 0.0)), 0.01)
+    oos_frac = st.slider("Hold-out (OOS) fraction", 0.0, 0.5,
+                         float(d.get("oos_frac", 0.3)), 0.05,
                          help="Last X% of the period is treated as out-of-sample; "
                               "metrics are reported separately so you can see if "
                               "the signal survives outside the fitting window.")
+    if st.button("Save these settings as my defaults", use_container_width=True):
+        ws["defaults"].update(
+            mode=mode, quantile=quantile, rebalance=int(rebal), cost_bps=cost_bps,
+            max_weight=max_w, vol_target=vol_target, oos_frac=oos_frac,
+            benchmark=bench_choice if bench_choice != "Other…" else None)
+        save_workspace(ws)
+        st.toast("Defaults saved")
 
     run = st.button("▶ Run backtest", type="primary", use_container_width=True)
 
@@ -167,6 +242,9 @@ if run:
         if prices.empty:
             st.error("No prices for that selection.")
             st.stop()
+        if bench_ticker and bench.empty:
+            st.warning(f"No prices for benchmark **{bench_ticker}** — "
+                       "running without a benchmark.")
         # Drop names with sparse history (<60% of days)
         keep = prices.columns[prices.notna().mean() > 0.6]
         prices, volume = prices[keep], volume.reindex(columns=keep)
