@@ -10,3 +10,4 @@ requests>=2.31
 # Optional: Snowflake system-of-record (installed separately if wheels exist for your Python)
 # snowflake-connector-python>=3.12
 matplotlib>=3.8
+openpyxl>=3.1

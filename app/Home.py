@@ -73,6 +73,15 @@ def _theories():
     return get_theory_store(_source())
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_macro() -> pd.DataFrame:
+    """Macro series always live in the local store (uploaded via Data Explorer)."""
+    try:
+        return DuckDBSource().get_macro_panel()
+    except Exception:
+        return pd.DataFrame()
+
+
 src = _source()
 _SOURCE_BADGES = {
     "snowflake_axioma_read_only": "Axioma WW4 · Snowflake",
@@ -181,6 +190,7 @@ with st.sidebar:
                 save_workspace(ws)
                 st.rerun()
     with st.expander("DSL reference"):
+        macro_avail = list(_load_macro().columns)
         st.markdown(
             "**Time-series:** `returns(n)`, `momentum(lb, skip)`, `vol(n)`, "
             "`sma(n)`, `ema(n)`, `price()`, `drawdown(n)`, `rsi(n)`, "
@@ -188,7 +198,14 @@ with st.sidebar:
             "`ts_rank(x, n)`, `ts_zscore(x, n)`\n\n"
             "**Cross-sectional:** `rank(x)`, `zscore(x)`, `demean(x)`, "
             "`winsorize(x, z)`\n\n"
-            "**Math:** `log sqrt abs sign exp clip(x, lo, hi) where(cond, a, b)`"
+            "**Macro:** `macro(\"NAME\")`, `macro_z(\"NAME\", n)`, "
+            "`macro_chg(\"NAME\", n)` — e.g. "
+            "`where(macro(\"HY_OAS\") > 5, rank(-vol(63)), rank(momentum(252, 21)))`"
+            + ("\n\nLoaded series: " + ", ".join(f"`{s}`" for s in macro_avail)
+               if macro_avail else
+               "\n\n_No macro series loaded — upload a workbook in Data Explorer._")
+            + "\n\n**Math:** `log sqrt abs sign exp clip(x, lo, hi) "
+              "where(cond, a, b)`"
         )
 
     st.subheader("Portfolio")
@@ -250,7 +267,7 @@ if run:
         prices, volume = prices[keep], volume.reindex(columns=keep)
 
         try:
-            signal = evaluate_signal(expression, prices, volume)
+            signal = evaluate_signal(expression, prices, volume, _load_macro())
         except ValueError as err:
             st.error(str(err))
             st.stop()

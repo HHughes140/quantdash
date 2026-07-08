@@ -116,6 +116,75 @@ with st.expander("Upload custom factor returns"):
 
 st.divider()
 
+# ---------------- Macro data ----------------
+st.subheader("Macro data")
+_macro_store = DuckDBSource()
+macro_names = _macro_store.available_macro()
+if macro_names:
+    mp = _macro_store.get_macro_panel()
+    mc1, mc2 = st.columns([1, 2])
+    mc1.metric("Series", len(macro_names))
+    mc2.caption(", ".join(f"`{s}`" for s in macro_names)
+                + f" · {mp.index.min().date()} → {mp.index.max().date()}")
+else:
+    st.caption("No macro series loaded yet. Upload a workbook below to use "
+               "`macro(\"NAME\")` in signal expressions.")
+
+with st.expander("Upload macro workbook (Excel or CSV)", expanded=not macro_names):
+    st.caption(
+        "One date column + one column per series (levels). Excel: pick the "
+        "sheet. Series become available in the DSL as `macro(\"NAME\")`, "
+        "`macro_z(\"NAME\", n)`, `macro_chg(\"NAME\", n)` — values are "
+        "forward-filled onto trading days, so monthly/weekly data is fine."
+    )
+    mup = st.file_uploader("Workbook", type=["xlsx", "xls", "csv"], key="macro_up")
+    if mup is not None:
+        if mup.name.lower().endswith((".xlsx", ".xls")):
+            xl = pd.ExcelFile(mup)
+            sheet = st.selectbox("Sheet", xl.sheet_names, key="macro_sheet")
+            mdf = xl.parse(sheet)
+        else:
+            mdf = pd.read_csv(mup)
+        if mdf.empty:
+            st.error("Empty file/sheet.")
+        else:
+            st.dataframe(mdf.head(5), use_container_width=True)
+            cols = list(mdf.columns)
+            date_guess = next(
+                (c for c in cols if str(c).lower() in
+                 ("date", "ddate", "dt", "day", "month", "period")), cols[0])
+            datec = st.selectbox("Date column", cols,
+                                 index=cols.index(date_guess), key="macro_date")
+            numeric = [c for c in cols if c != datec and
+                       pd.to_numeric(mdf[c], errors="coerce").notna().mean() > 0.5]
+            series_cols = st.multiselect("Series columns", numeric,
+                                         default=numeric, key="macro_cols")
+            if st.button("Load macro series", key="macro_load") and series_cols:
+                mdf[datec] = pd.to_datetime(mdf[datec], errors="coerce")
+                mdf = mdf.dropna(subset=[datec])
+                long = mdf.melt(id_vars=datec, value_vars=series_cols,
+                                var_name="series", value_name="value")
+                long["value"] = pd.to_numeric(long["value"], errors="coerce")
+                long = long.dropna(subset=["value"])
+                # normalize names to DSL-friendly identifiers
+                long["series"] = (long["series"].astype(str).str.strip()
+                                  .str.upper().str.replace(r"[^A-Z0-9]+", "_",
+                                                           regex=True)
+                                  .str.strip("_"))
+                long["date"] = long[datec].dt.date
+                if long.empty:
+                    st.error("No parsable rows.")
+                else:
+                    n = _macro_store.write_macro(long[["date", "series", "value"]])
+                    st.success(
+                        f"Loaded {n:,} rows across "
+                        f"{long['series'].nunique()} series: "
+                        + ", ".join(f"`{s}`"
+                                    for s in sorted(long["series"].unique())))
+                    st.cache_data.clear()
+
+st.divider()
+
 # ---------------- Seeding ----------------
 st.subheader("Seed / refresh data")
 if read_only:

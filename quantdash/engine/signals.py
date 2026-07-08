@@ -10,6 +10,11 @@ in the namespace, so theories read like:
     -vol(63)                                  # low volatility
     rank(returns(126)) / (1 + vol(21))        # vol-adjusted momentum
     zscore(volume_ratio(5, 63))               # volume shock
+
+Macro conditioning (series uploaded via Data Explorer):
+
+    where(macro("HY_OAS") > 5, rank(-vol(63)), rank(momentum(252, 21)))
+    rank(momentum(252, 21)) * sign(macro_chg("PC_PRICING_INDEX", 63))
 """
 
 from __future__ import annotations
@@ -18,8 +23,39 @@ import numpy as np
 import pandas as pd
 
 
-def _make_namespace(prices: pd.DataFrame, volume: pd.DataFrame | None):
+def _make_namespace(prices: pd.DataFrame, volume: pd.DataFrame | None,
+                    macro_panel: pd.DataFrame | None = None):
     daily = prices.pct_change(fill_method=None)
+
+    def _macro_series(name: str) -> pd.Series:
+        if macro_panel is None or macro_panel.empty:
+            raise ValueError(
+                f"macro('{name}') used but no macro data is loaded — upload a "
+                "workbook in Data Explorer first")
+        if name not in macro_panel.columns:
+            raise ValueError(
+                f"macro series '{name}' not found. Available: "
+                + ", ".join(sorted(macro_panel.columns)))
+        return macro_panel[name].reindex(prices.index).ffill()
+
+    def _broadcast(s: pd.Series) -> pd.DataFrame:
+        return pd.DataFrame(
+            np.tile(s.to_numpy()[:, None], (1, len(prices.columns))),
+            index=prices.index, columns=prices.columns)
+
+    def macro(name: str) -> pd.DataFrame:
+        """Macro series level, forward-filled and broadcast across tickers."""
+        return _broadcast(_macro_series(name))
+
+    def macro_z(name: str, n: int = 252) -> pd.DataFrame:
+        """Trailing n-day z-score of a macro series (broadcast)."""
+        s = _macro_series(name)
+        z = (s - s.rolling(n).mean()) / s.rolling(n).std()
+        return _broadcast(z)
+
+    def macro_chg(name: str, n: int = 21) -> pd.DataFrame:
+        """n-day change (difference) in a macro series (broadcast)."""
+        return _broadcast(_macro_series(name).diff(n))
 
     # ---- time-series operators (per ticker) ----
     def returns(n: int) -> pd.DataFrame:
@@ -100,6 +136,7 @@ def _make_namespace(prices: pd.DataFrame, volume: pd.DataFrame | None):
         "delta": delta, "ts_rank": ts_rank, "ts_zscore": ts_zscore,
         "drawdown": drawdown, "rsi": rsi, "volume_ratio": volume_ratio,
         "rank": rank, "zscore": zscore, "demean": demean, "winsorize": winsorize,
+        "macro": macro, "macro_z": macro_z, "macro_chg": macro_chg,
         "log": np.log, "sqrt": np.sqrt, "abs": np.abs, "sign": np.sign,
         "exp": np.exp, "clip": lambda df, lo, hi: df.clip(lo, hi),
         "where": lambda cond, a, b: a.where(cond, b),
@@ -112,15 +149,19 @@ def evaluate_signal(
     expression: str,
     prices: pd.DataFrame,
     volume: pd.DataFrame | None = None,
+    macro_panel: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Evaluate a signal expression over the price panel.
+
+    macro_panel: optional date x series DataFrame exposed via macro()/macro_z()/
+    macro_chg() in the expression namespace.
 
     Returns a date x ticker DataFrame (higher = more attractive).
     Raises ValueError with a readable message on bad expressions.
     """
     if not expression or not expression.strip():
         raise ValueError("Empty signal expression")
-    ns = _make_namespace(prices, volume)
+    ns = _make_namespace(prices, volume, macro_panel)
     try:
         result = eval(expression, {"__builtins__": {}}, ns)  # noqa: S307 - local research tool
     except Exception as e:

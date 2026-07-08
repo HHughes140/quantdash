@@ -15,7 +15,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from quantdash.data import get_source
+from quantdash.data import DuckDBSource, get_source
 from quantdash.engine import (BacktestConfig, compute_metrics, evaluate_signal,
                               run_backtest)
 from quantdash.data.universe import BENCHMARKS
@@ -35,6 +35,15 @@ MAX_COMBOS = 64
 @st.cache_resource
 def _source():
     return get_source()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _macro():
+    try:
+        return DuckDBSource().get_macro_panel()
+    except Exception:
+        import pandas as _pd
+        return _pd.DataFrame()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -120,7 +129,7 @@ if st.button("▶ Run sweep", type="primary"):
             expr = expr.replace("{B}", str(b))
         label = f"A={a}" + (f", B={b}" if b is not None else "")
         try:
-            sig = evaluate_signal(expr, prices, volume)
+            sig = evaluate_signal(expr, prices, volume, _macro())
             res = run_backtest(prices, sig, cfg, bench)
             ridx = res.net_returns.index
             split = ridx[int(len(ridx) * (1 - oos_frac))]

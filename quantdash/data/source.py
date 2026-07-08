@@ -45,6 +45,9 @@ DDL = [
         config_json VARCHAR, metrics_json VARCHAR, verdict VARCHAR,
         created_at TIMESTAMP
     )""",
+    """CREATE TABLE IF NOT EXISTS MACRO (
+        date DATE, series VARCHAR, value DOUBLE
+    )""",
 ]
 
 
@@ -162,6 +165,48 @@ class DataSource:
         placeholders = ",".join(["?"] * len(names))
         self._execute(f"DELETE FROM FACTORS WHERE factor IN ({placeholders})", names)
         self._insert_df("FACTORS", df[["date", "factor", "value"]])
+        return len(df)
+
+    # ---- macro series ------------------------------------------------------------
+    def available_macro(self) -> list[str]:
+        df = self._query("SELECT DISTINCT series FROM MACRO ORDER BY series")
+        return df["series"].tolist() if not df.empty else []
+
+    def get_macro_panel(
+        self,
+        names: Optional[Sequence[str]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Return date x series panel of macro levels."""
+        clauses, params = [], []
+        if names:
+            placeholders = ",".join(["?"] * len(names))
+            clauses.append(f"series IN ({placeholders})")
+            params.extend(list(names))
+        if start:
+            clauses.append("date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("date <= ?")
+            params.append(end)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        df = self._query(f"SELECT date, series, value FROM MACRO {where}", params)
+        if df.empty:
+            return pd.DataFrame()
+        panel = df.pivot_table(index="date", columns="series", values="value",
+                               aggfunc="last")
+        panel.index = pd.to_datetime(panel.index)
+        return panel.sort_index()
+
+    def write_macro(self, df: pd.DataFrame) -> int:
+        """df: long format (date, series, value). Replaces same series names."""
+        if df.empty:
+            return 0
+        names = df["series"].unique().tolist()
+        placeholders = ",".join(["?"] * len(names))
+        self._execute(f"DELETE FROM MACRO WHERE series IN ({placeholders})", names)
+        self._insert_df("MACRO", df[["date", "series", "value"]])
         return len(df)
 
     # ---- theories ----------------------------------------------------------------
