@@ -19,6 +19,7 @@ from quantdash.data import DuckDBSource, get_source
 from quantdash.data.universe import BENCHMARKS
 from quantdash.engine import BacktestConfig, compute_metrics
 from quantdash.engine.walkforward import candidate_returns, walk_forward
+from quantdash.workspace import load_workspace
 from quantdash.ui import (ACCENT, GOLD, GRAY, GREEN, RED, diverging_colors,
                           inject_css, page_header, style_fig)
 
@@ -94,7 +95,8 @@ if st.button("▶ Run walk-forward", type="primary"):
         cand = candidate_returns(
             prices, volume, template, a_vals, cfg, _macro(),
             progress=lambda f, a: prog.progress(
-                f * 0.9, text=f"Backtesting candidates... A={a}"))
+                f * 0.9, text=f"Backtesting candidates... A={a}"),
+            definitions=load_workspace().get("definitions") or {})
         prog.progress(0.95, text="Stitching walk-forward windows...")
         wf, windows = walk_forward(cand, train_days=TRAIN, test_days=TEST)
     except ValueError as e:

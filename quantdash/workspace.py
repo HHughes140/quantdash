@@ -16,6 +16,14 @@ _DEFAULTS = {
     "signal_presets": {},   # name -> expression
     "universes": {},        # name -> [tickers]
     "trials": [],           # [{h: expr+config hash, sharpe}] for deflated Sharpe
+    "definitions": {},      # name -> DSL expression, injected as variables
+    "subsector_map": None,  # ticker -> subsector; None = built-in taxonomy
+    "market_phases": None,  # [[start, end, label, kind]]; None = built-in
+    "cat_events": None,     # [[date, label]]; None = built-in
+    "params": {
+        "capacity_aum_m": "10, 50, 100, 250, 500, 1000",
+        "decay_horizons": "1, 5, 10, 21, 63",
+    },
     "defaults": {
         "mode": "long_short",
         "quantile": 0.2,
@@ -34,13 +42,11 @@ def load_workspace() -> dict:
     if WS_PATH.exists():
         try:
             saved = json.loads(WS_PATH.read_text())
-            for key in ("signal_presets", "universes"):
-                if isinstance(saved.get(key), dict):
-                    ws[key].update(saved[key])
-            if isinstance(saved.get("defaults"), dict):
-                ws["defaults"].update(saved["defaults"])
-            if isinstance(saved.get("trials"), list):
-                ws["trials"] = saved["trials"]
+            for key, val in saved.items():
+                if isinstance(val, dict) and isinstance(ws.get(key), dict):
+                    ws[key].update(val)
+                else:
+                    ws[key] = val
         except (json.JSONDecodeError, OSError):
             pass  # corrupt/unreadable workspace: fall back to defaults
     return ws

@@ -19,6 +19,7 @@ from quantdash.data import DuckDBSource, get_source
 from quantdash.engine import (BacktestConfig, compute_metrics, evaluate_signal,
                               run_backtest)
 from quantdash.data.universe import BENCHMARKS
+from quantdash.workspace import load_workspace
 from quantdash.ui import ACCENT, GREEN, RED, diverging_colors, inject_css, page_header, style_fig
 
 st.set_page_config(page_title="Parameter Sweep — Insurance Alpha Lab",
@@ -35,6 +36,10 @@ MAX_COMBOS = 64
 @st.cache_resource
 def _source():
     return get_source()
+
+
+def _defs():
+    return load_workspace().get("definitions") or {}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -129,7 +134,8 @@ if st.button("▶ Run sweep", type="primary"):
             expr = expr.replace("{B}", str(b))
         label = f"A={a}" + (f", B={b}" if b is not None else "")
         try:
-            sig = evaluate_signal(expr, prices, volume, _macro())
+            sig = evaluate_signal(expr, prices, volume, _macro(),
+                                  definitions=_defs())
             res = run_backtest(prices, sig, cfg, bench)
             ridx = res.net_returns.index
             split = ridx[int(len(ridx) * (1 - oos_frac))]

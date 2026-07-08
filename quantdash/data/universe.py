@@ -43,6 +43,14 @@ SUBSECTOR = {t: sub for sub, ts in INSURANCE_UNIVERSE.items() for t in ts}
 
 BENCHMARKS = ["SPY", "KIE", "IAK"]
 
+
+def effective_subsector(ws: dict | None = None) -> dict:
+    """Active ticker -> subsector map: the workspace-edited taxonomy if one
+    has been saved (Settings page), otherwise the built-in one."""
+    if ws and ws.get("subsector_map"):
+        return {str(t).upper(): s for t, s in ws["subsector_map"].items() if s}
+    return dict(SUBSECTOR)
+
 DEFAULT_UNIVERSE = [
     # Tech / communication
     "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AVGO", "ORCL", "CRM", "ADBE",

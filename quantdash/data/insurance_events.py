@@ -39,6 +39,21 @@ PHASE_COLORS = {
 }
 
 
+def get_market_phases(ws: dict | None = None) -> list:
+    """Workspace-edited phases (Settings page) or the built-in list."""
+    saved = (ws or {}).get("market_phases")
+    if saved:
+        return [tuple(p) for p in saved if len(p) == 4]
+    return MARKET_PHASES
+
+
+def get_cat_events(ws: dict | None = None) -> list:
+    saved = (ws or {}).get("cat_events")
+    if saved:
+        return [tuple(e) for e in saved if len(e) == 2]
+    return CAT_EVENTS
+
+
 def event_study(
     prices: pd.DataFrame,
     group_of: dict,

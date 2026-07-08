@@ -36,12 +36,13 @@ def candidate_returns(
     cfg: BacktestConfig,
     macro_panel: Optional[pd.DataFrame] = None,
     progress=None,
+    definitions: Optional[dict] = None,
 ) -> pd.DataFrame:
     """Full-period net daily returns for each candidate parameter value."""
     out = {}
     for i, a in enumerate(a_values):
         expr = template.replace("{A}", str(a))
-        sig = evaluate_signal(expr, prices, volume, macro_panel)
+        sig = evaluate_signal(expr, prices, volume, macro_panel, definitions)
         res = run_backtest(prices, sig, cfg)
         out[a] = res.net_returns
         if progress:

@@ -12,7 +12,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from quantdash.data import DuckDBSource, get_source, get_theory_store
-from quantdash.data.universe import BENCHMARKS, INSURANCE_UNIVERSE, SUBSECTOR
+from quantdash.data.universe import BENCHMARKS, effective_subsector
 from quantdash.workspace import load_workspace, save_workspace
 from quantdash.engine import (
     SIGNAL_PRESETS,
@@ -29,8 +29,8 @@ from quantdash.engine.attribution import (
     position_contribution,
     universe_performance,
 )
-from quantdash.data.insurance_events import (CAT_EVENTS, MARKET_PHASES,
-                                             PHASE_COLORS, event_study)
+from quantdash.data.insurance_events import (PHASE_COLORS, event_study,
+                                             get_cat_events, get_market_phases)
 from quantdash.engine.capacity import capacity_analysis, dollar_adv
 from quantdash.engine.factors import factor_exposure_heatmap_data
 from quantdash.engine.metrics import (deflated_sharpe, drawdown_series,
@@ -88,6 +88,25 @@ def _load_macro() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _parse_ints(raw: str) -> tuple:
+    out = []
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            out.append(int(tok))
+    return tuple(out) or (1, 5, 10, 21, 63)
+
+
+def _parse_floats(raw: str) -> list:
+    out = []
+    for tok in str(raw).split(","):
+        try:
+            out.append(float(tok.strip()))
+        except ValueError:
+            continue
+    return out
+
+
 src = _source()
 _SOURCE_BADGES = {
     "snowflake_axioma_read_only": "Axioma WW4 · Snowflake",
@@ -111,18 +130,20 @@ with st.sidebar:
     st.header("Experiment")
 
     ws = load_workspace()
-    insurance_avail = [t for t in tickers_all if t in SUBSECTOR]
+    SUB_MAP = effective_subsector(ws)
+    SUBSECTOR_NAMES = sorted(set(SUB_MAP.values()))
+    insurance_avail = [t for t in tickers_all if t in SUB_MAP]
     universe_opts = (["Insurance", "Insurance subsectors"] if insurance_avail else []) \
         + ["All available", "Custom"] + (["Saved"] if ws["universes"] else [])
     universe_mode = st.radio("Universe", universe_opts, horizontal=True)
     if universe_mode == "Insurance":
         tickers = insurance_avail
         st.caption(f"{len(tickers)} insurance names across "
-                   f"{len({SUBSECTOR[t] for t in tickers})} subsectors")
+                   f"{len({SUB_MAP[t] for t in tickers})} subsectors")
     elif universe_mode == "Insurance subsectors":
-        subs = st.multiselect("Subsectors", list(INSURANCE_UNIVERSE),
-                              default=list(INSURANCE_UNIVERSE)[:4])
-        tickers = [t for t in insurance_avail if SUBSECTOR[t] in subs]
+        subs = st.multiselect("Subsectors", SUBSECTOR_NAMES,
+                              default=SUBSECTOR_NAMES[:4])
+        tickers = [t for t in insurance_avail if SUB_MAP[t] in subs]
     elif universe_mode == "Custom":
         tickers = st.multiselect("Tickers", tickers_all,
                                  default=tickers_all[: min(50, len(tickers_all))])
@@ -212,6 +233,9 @@ with st.sidebar:
                "\n\n_No macro series loaded — upload a workbook in Data Explorer._")
             + "\n\n**Math:** `log sqrt abs sign exp clip(x, lo, hi) "
               "where(cond, a, b)`"
+            + (("\n\n**Your definitions** (Settings page): "
+                + ", ".join(f"`{n}`" for n in sorted(ws.get("definitions") or {})))
+               if ws.get("definitions") else "")
         )
 
     st.subheader("Portfolio")
@@ -227,9 +251,8 @@ with st.sidebar:
                             "signal_weight": "Signal-proportional weights"}[x])
     c1, c2 = st.columns(2)
     quantile = c1.slider("Quantile", 0.05, 0.5, float(d.get("quantile", 0.2)), 0.05)
-    rebal = c2.selectbox("Rebalance (days)", _rebals,
-                         index=_rebals.index(int(d.get("rebalance", 5)))
-                         if int(d.get("rebalance", 5)) in _rebals else 1)
+    rebal = c2.number_input("Rebalance (days)", 1, 126,
+                            int(d.get("rebalance", 5)))
     c3, c4 = st.columns(2)
     cost_bps = c3.number_input("Cost (bps, one-way)", 0.0, 100.0,
                                float(d.get("cost_bps", 5.0)), 1.0)
@@ -288,7 +311,8 @@ if run:
         prices, volume = prices[keep], volume.reindex(columns=keep)
 
         try:
-            signal = evaluate_signal(expression, prices, volume, _load_macro())
+            signal = evaluate_signal(expression, prices, volume, _load_macro(),
+                                     definitions=ws.get("definitions") or {})
         except ValueError as err:
             st.error(str(err))
             st.stop()
@@ -304,7 +328,7 @@ if run:
         try:
             result = run_backtest(prices, signal, cfg,
                                   bench[bench_ticker] if not bench.empty else None,
-                                  groups=SUBSECTOR)
+                                  groups=SUB_MAP)
         except ValueError as err:
             st.error(str(err))
             st.stop()
@@ -327,7 +351,9 @@ if run:
             result=result, prices=prices, factors=factors,
             expression=expression, cfg=cfg, signal=signal, oos_frac=oos_frac,
             bench_ticker=bench_ticker if not bench.empty else None,
-            volume=volume, decay=ic_by_horizon(signal, prices),
+            volume=volume,
+            decay=ic_by_horizon(signal, prices, horizons=_parse_ints(
+                ws.get("params", {}).get("decay_horizons", "1,5,10,21,63"))),
         )
 
 if "result" not in st.session_state:
@@ -462,7 +488,7 @@ with tab_ov:
                       row=1, col=1)
     if cycle_overlay:
         t0, t1 = result.equity.index[0], result.equity.index[-1]
-        for p_s, p_e, label, kind in MARKET_PHASES:
+        for p_s, p_e, label, kind in get_market_phases(ws):
             ps, pe = pd.Timestamp(p_s), pd.Timestamp(p_e)
             if pe < t0 or ps > t1:
                 continue
@@ -471,7 +497,7 @@ with tab_ov:
                           annotation_text=label, annotation_position="bottom left",
                           annotation_font=dict(size=10, color="#8B93A7"),
                           row=1, col=1)
-        for ev_date, ev_label in CAT_EVENTS:
+        for ev_date, ev_label in get_cat_events(ws):
             ev = pd.Timestamp(ev_date)
             if t0 <= ev <= t1:
                 fig.add_vline(x=ev, line_width=1, line_dash="dot",
@@ -658,8 +684,8 @@ with tab_win:
 
 # ---------------- Sector Lens ----------------
 with tab_sec:
-    sub_of = {t: SUBSECTOR.get(t, "Other") for t in result.weights.columns}
-    mapped = [t for t in result.weights.columns if t in SUBSECTOR]
+    sub_of = {t: SUB_MAP.get(t, "Other") for t in result.weights.columns}
+    mapped = [t for t in result.weights.columns if t in SUB_MAP]
     if not mapped:
         st.info("No insurance names in this universe — pick an Insurance "
                 "universe in the sidebar to use the Sector Lens.")
@@ -736,7 +762,8 @@ with tab_sec:
                    "strategy's subsector mix against which tapes are working.")
 
         st.subheader("Cat event study")
-        es = event_study(prices[mapped], sub_of, pre_days=10, post_days=30)
+        es = event_study(prices[mapped], sub_of, events=get_cat_events(ws),
+                         pre_days=10, post_days=30)
         if es.empty:
             st.caption("No cat events fall inside this data window.")
         else:
@@ -750,7 +777,7 @@ with tab_sec:
                                   + "</extra>"))
             fig_es.add_vline(x=0, line_dash="dot",
                              line_color="rgba(255,255,255,0.3)")
-            n_ev = sum(1 for d, _ in CAT_EVENTS
+            n_ev = sum(1 for d, _ in get_cat_events(ws)
                        if prices.index[0] <= pd.Timestamp(d) <= prices.index[-1])
             style_fig(fig_es, height=380, ytickformat=".1%",
                       title=f"Average subsector return around {n_ev} major cat "
@@ -1006,7 +1033,12 @@ with tab_num:
     else:
         adv = dollar_adv(prices, vol_panel,
                          volume_is_dollars=(src.name == "snowflake_axioma_read_only"))
-        cap = capacity_analysis(result.net_returns, result.weights, prices, adv)
+        _aum_grid = [v * 1e6 for v in _parse_floats(
+            ws.get("params", {}).get("capacity_aum_m", "10,50,100,250,500,1000"))]
+        if not _aum_grid:
+            _aum_grid = [10e6, 50e6, 100e6, 250e6, 500e6, 1e9]
+        cap = capacity_analysis(result.net_returns, result.weights, prices, adv,
+                                aum_grid=_aum_grid)
         cap_disp = cap.reset_index()
         cap_disp["aum"] = cap_disp["aum"].map(lambda v: f"${v/1e6:,.0f}M")
         cp1, cp2 = st.columns([2, 3])

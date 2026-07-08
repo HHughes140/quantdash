@@ -150,11 +150,15 @@ def evaluate_signal(
     prices: pd.DataFrame,
     volume: pd.DataFrame | None = None,
     macro_panel: pd.DataFrame | None = None,
+    definitions: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Evaluate a signal expression over the price panel.
 
     macro_panel: optional date x series DataFrame exposed via macro()/macro_z()/
     macro_chg() in the expression namespace.
+    definitions: optional {NAME: expression} of reusable building blocks —
+    each is evaluated (in order, later ones may reference earlier ones) and
+    injected as a variable, so expressions can read `0.6*QUALITY + 0.4*CHEAP`.
 
     Returns a date x ticker DataFrame (higher = more attractive).
     Raises ValueError with a readable message on bad expressions.
@@ -162,6 +166,14 @@ def evaluate_signal(
     if not expression or not expression.strip():
         raise ValueError("Empty signal expression")
     ns = _make_namespace(prices, volume, macro_panel)
+    for name, dexpr in (definitions or {}).items():
+        if not str(name).isidentifier() or not str(dexpr).strip():
+            continue
+        try:
+            ns[name] = eval(dexpr, {"__builtins__": {}}, ns)  # noqa: S307
+        except Exception as e:
+            raise ValueError(
+                f"Definition '{name}' error: {type(e).__name__}: {e}") from e
     try:
         result = eval(expression, {"__builtins__": {}}, ns)  # noqa: S307 - local research tool
     except Exception as e:
